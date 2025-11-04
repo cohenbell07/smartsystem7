@@ -20,6 +20,8 @@ class AgentState(TypedDict):
     artifacts: list
     step_count: int
     errors: list
+    token_usage: list  # Track token usage per step
+    total_cost: float  # Accumulated cost in USD
 
 
 def create_llm_node(node_spec: dict, llm_router):
@@ -30,7 +32,8 @@ def create_llm_node(node_spec: dict, llm_router):
 
         try:
             # Get the appropriate LLM
-            llm = await llm_router.get_llm()
+            model_name = node_spec.get("model")
+            llm = await llm_router.get_llm(model_name)
 
             # Build prompt from state
             messages = state.get("messages", [])
@@ -45,9 +48,41 @@ def create_llm_node(node_spec: dict, llm_router):
             # Update state
             messages.append(AIMessage(content=response.content))
 
+            # Track token usage and cost
+            token_usage = state.get("token_usage", [])
+            total_cost = state.get("total_cost", 0.0)
+
+            # Extract usage info from response (if available)
+            usage_metadata = {}
+            if hasattr(response, "response_metadata"):
+                usage_metadata = response.response_metadata.get("usage", {})
+            elif hasattr(response, "usage_metadata"):
+                usage_metadata = response.usage_metadata or {}
+
+            if usage_metadata:
+                # Calculate cost for this step
+                from app.services.pricing import calculate_actual_cost
+
+                # Get the actual model name from LLM
+                actual_model = llm.model_name if hasattr(llm, "model_name") else (llm.model if hasattr(llm, "model") else "unknown")
+
+                step_cost = calculate_actual_cost(usage_metadata, actual_model)
+                total_cost += step_cost
+
+                token_usage.append({
+                    "node": node_spec["name"],
+                    "model": actual_model,
+                    "usage": usage_metadata,
+                    "cost": step_cost,
+                })
+
+                logger.info(f"Node {node_spec['name']} used {usage_metadata.get('total_tokens', 0)} tokens, cost: ${step_cost:.6f}")
+
             return {
                 "messages": messages,
                 "step_count": state.get("step_count", 0) + 1,
+                "token_usage": token_usage,
+                "total_cost": total_cost,
             }
 
         except Exception as e:

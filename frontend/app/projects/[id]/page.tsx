@@ -3,8 +3,8 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import useSWR from 'swr'
-import { getProject, saveAgent } from '@/lib/api'
-import { formatTimeAgo } from '@/lib/utils'
+import { getProject, saveAgent, estimateCost, runAgent, type CostEstimate } from '@/lib/api'
+import { formatTimeAgo, formatCurrency, formatNumber } from '@/lib/utils'
 
 export default function ProjectPage() {
   const params = useParams()
@@ -18,6 +18,10 @@ export default function ProjectPage() {
 
   const [savingAgent, setSavingAgent] = useState(false)
   const [agentName, setAgentName] = useState('')
+  const [costEstimate, setCostEstimate] = useState<CostEstimate | null>(null)
+  const [loadingCost, setLoadingCost] = useState(false)
+  const [showCostModal, setShowCostModal] = useState(false)
+  const [runningAgent, setRunningAgent] = useState(false)
 
   const handleSaveAgent = async () => {
     if (!agentName.trim()) {
@@ -35,6 +39,35 @@ export default function ProjectPage() {
       console.error(err)
     } finally {
       setSavingAgent(false)
+    }
+  }
+
+  const handleEstimateCost = async () => {
+    setLoadingCost(true)
+    try {
+      const estimate = await estimateCost(projectId, undefined, {})
+      setCostEstimate(estimate)
+      setShowCostModal(true)
+    } catch (err) {
+      alert('Failed to estimate cost')
+      console.error(err)
+    } finally {
+      setLoadingCost(false)
+    }
+  }
+
+  const handleRunAgent = async () => {
+    setRunningAgent(true)
+    setShowCostModal(false)
+    try {
+      const result = await runAgent(projectId, undefined, {})
+      mutate() // Refresh project data
+      alert(`Agent run started! Run ID: ${result.run_id}`)
+    } catch (err) {
+      alert('Failed to start agent run')
+      console.error(err)
+    } finally {
+      setRunningAgent(false)
     }
   }
 
@@ -140,7 +173,7 @@ export default function ProjectPage() {
         </div>
       )}
 
-      {/* Agent Spec */}
+      {/* Agent Spec with Run Button */}
       {data.agent_spec && (
         <div className="bg-white rounded-lg shadow mb-8 p-6">
           <h2 className="text-xl font-semibold mb-4">Proposed Agent</h2>
@@ -149,7 +182,7 @@ export default function ProjectPage() {
             <p className="text-gray-600">{data.agent_spec.description}</p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-6">
+          <div className="grid md:grid-cols-2 gap-6 mb-6">
             <div>
               <h4 className="font-medium mb-2">Required Tools</h4>
               <ul className="list-disc list-inside text-gray-700">
@@ -173,8 +206,19 @@ export default function ProjectPage() {
             </div>
           </div>
 
+          {/* Run Agent Button */}
+          <div className="mb-6 pb-6 border-b">
+            <button
+              onClick={handleEstimateCost}
+              disabled={loadingCost || runningAgent}
+              className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors font-medium"
+            >
+              {loadingCost ? 'Estimating Cost...' : runningAgent ? 'Running...' : 'Run Agent'}
+            </button>
+          </div>
+
           {/* Save Agent */}
-          <div className="mt-6 pt-6 border-t">
+          <div>
             <h4 className="font-medium mb-3">Save to Portfolio</h4>
             <div className="flex gap-3">
               <input
@@ -191,6 +235,123 @@ export default function ProjectPage() {
               >
                 {savingAgent ? 'Saving...' : 'Save Agent'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cost Estimate and Runs */}
+      {data.runs && data.runs.length > 0 && (
+        <div className="bg-white rounded-lg shadow mb-8 p-6">
+          <h2 className="text-xl font-semibold mb-4">Recent Runs</h2>
+          <div className="space-y-4">
+            {data.runs.map((run: any) => (
+              <div key={run.id} className="border rounded-lg p-4">
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <div className="font-medium">Run #{run.id}</div>
+                    <div className="text-sm text-gray-500">
+                      {run.started_at ? formatTimeAgo(run.started_at) : 'Not started'}
+                    </div>
+                  </div>
+                  <div className={`px-3 py-1 rounded-full text-xs font-medium ${
+                    run.status === 'completed' ? 'bg-green-100 text-green-800' :
+                    run.status === 'failed' ? 'bg-red-100 text-red-800' :
+                    run.status === 'running' ? 'bg-blue-100 text-blue-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}>
+                    {run.status.toUpperCase()}
+                  </div>
+                </div>
+                {(run.cost_estimate || run.actual_cost) && (
+                  <div className="mt-3 pt-3 border-t grid grid-cols-2 gap-4 text-sm">
+                    {run.cost_estimate && (
+                      <div>
+                        <div className="text-gray-500">Estimated Cost</div>
+                        <div className="font-semibold">{formatCurrency(run.cost_estimate)}</div>
+                      </div>
+                    )}
+                    {run.actual_cost && (
+                      <div>
+                        <div className="text-gray-500">Actual Cost</div>
+                        <div className="font-semibold text-green-600">{formatCurrency(run.actual_cost)}</div>
+                      </div>
+                    )}
+                    {run.total_tokens && (
+                      <div>
+                        <div className="text-gray-500">Total Tokens</div>
+                        <div className="font-semibold">{formatNumber(run.total_tokens)}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Cost Modal */}
+      {showCostModal && costEstimate && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <h2 className="text-2xl font-bold mb-4">Cost Estimate</h2>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-lg font-medium">Total Estimated Cost</span>
+                  <span className="text-3xl font-bold text-blue-600">
+                    {formatCurrency(costEstimate.total_estimated_cost)}
+                  </span>
+                </div>
+                <p className="text-sm text-gray-600">{costEstimate.warning}</p>
+              </div>
+
+              <div className="mb-6">
+                <h3 className="font-semibold mb-3">Cost Breakdown by Model</h3>
+                <div className="space-y-3">
+                  {costEstimate.breakdown.map((item, i) => (
+                    <div key={i} className="border rounded-lg p-4">
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <div className="font-medium">{item.model}</div>
+                          <div className="text-sm text-gray-500">{item.role}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-semibold">{formatCurrency(item.estimated_cost)}</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4 mt-2 text-sm">
+                        <div>
+                          <div className="text-gray-500">Est. Input Tokens</div>
+                          <div>{formatNumber(item.estimated_input_tokens)}</div>
+                        </div>
+                        <div>
+                          <div className="text-gray-500">Est. Output Tokens</div>
+                          <div>{formatNumber(item.estimated_output_tokens)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowCostModal(false)}
+                  className="flex-1 px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleRunAgent}
+                  disabled={runningAgent}
+                  className="flex-1 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors font-medium"
+                >
+                  {runningAgent ? 'Starting...' : 'Approve & Run'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

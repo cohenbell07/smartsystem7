@@ -137,6 +137,66 @@ Monitor real-time logs as the agent:
 
 Save successful agents to reuse with new inputs from the "My Agents" page.
 
+## 💰 Cost Tracking
+
+Agent Factory includes real-time cost estimation and tracking for all LLM API calls:
+
+### Features
+
+- **Pre-Run Cost Estimates**: Before executing an agent, see a breakdown of estimated costs by model
+- **Live Pricing**: Automatically fetches current pricing for OpenAI and Anthropic models
+- **Token Tracking**: Monitors actual token usage (input + output) during execution
+- **Cost Breakdown**: Detailed cost information per model and execution step
+- **Historical Data**: View estimated vs. actual costs for all past runs
+
+### How It Works
+
+1. **Click "Run Agent"** → The system fetches current pricing and estimates tokens needed
+2. **Review Cost Estimate** → A modal shows the breakdown by model (e.g., GPT-4o, Claude 3.5 Sonnet)
+3. **Approve & Run** → The agent executes and tracks actual token usage
+4. **View Results** → See actual cost compared to estimate in the run details
+
+### Example Cost Estimate
+
+```
+Total Estimated Cost: $0.0234
+
+Breakdown:
+- gpt-4o (planning)       120,000 tokens → $0.0145
+- claude-3-5-sonnet (exec) 60,000 tokens → $0.0089
+
+Warning: Estimate only - actual costs may vary by 30-50%
+```
+
+### API Usage
+
+```bash
+# Get current pricing
+curl http://localhost:8000/api/pricing
+
+# Estimate cost before running
+curl -X POST http://localhost:8000/api/estimate-cost \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": 1, "inputs": {}}'
+
+# Check actual cost after run
+curl http://localhost:8000/api/runs/123
+```
+
+### Cost Tracking in Code
+
+The pricing service in `backend/app/services/pricing.py` provides:
+
+- `estimate_run_cost(agent_spec, input_text)` - Estimate cost before execution
+- `calculate_actual_cost(usage_data, model)` - Calculate actual cost from API response
+- `get_current_pricing()` - Get live pricing for all models
+
+Costs are automatically tracked in the database `runs` table with fields:
+- `cost_estimate` - Estimated cost in USD
+- `actual_cost` - Actual cost after execution
+- `total_tokens` - Total tokens used
+- `cost_breakdown` - JSON with detailed breakdown
+
 ## Commands
 
 ```bash
@@ -159,12 +219,15 @@ make clean        # Remove generated files
 ```
 POST   /api/ask              - Start new research project
 GET    /api/projects/:id     - Get project status & logs
+POST   /api/estimate-cost    - Estimate cost before running agent
 POST   /api/run              - Execute an agent spec
 POST   /api/approve          - Approve/reject gate action
 POST   /api/save-agent       - Save agent to portfolio
 GET    /api/agents           - List saved agents
 GET    /api/agents/:id       - Get agent details
 POST   /api/agents/:id/run   - Run saved agent with new inputs
+GET    /api/runs/:id         - Get run details including costs
+GET    /api/pricing          - Get current LLM pricing
 GET    /api/settings/secrets - Get secret placeholders
 PUT    /api/settings/secrets - Update secrets
 ```
@@ -200,7 +263,8 @@ backend/
 │       ├── llm_router.py      # GPT + Claude cooperation
 │       ├── approvals.py       # Approval gate system
 │       ├── notify.py          # Email + Discord notifications
-│       └── secrets.py         # Secret management
+│       ├── secrets.py         # Secret management
+│       └── pricing.py         # Cost estimation & tracking
 ├── workers/
 │   └── runner.py              # RQ job consumer
 ├── tests/
@@ -387,6 +451,7 @@ alembic upgrade head
 - [x] Background job processing (RQ)
 - [x] Next.js frontend with shadcn/ui
 - [x] SQLite dev database with migrations
+- [x] **Real-time cost estimation and tracking**
 
 ### 🚧 TODO
 
@@ -394,7 +459,7 @@ alembic upgrade head
 - [ ] GitHub Actions CI/CD
 - [ ] OAuth authentication (Clerk/Auth.js)
 - [ ] Agent versioning & rollback
-- [ ] Cost tracking per agent run
+- [ ] Cost analytics dashboard (monthly spend, trends)
 - [ ] Multi-tenancy
 - [ ] Agent marketplace
 - [ ] Webhook integrations
