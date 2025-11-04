@@ -21,7 +21,14 @@ from app.models import (
     Artifact,
     ResearchSource,
 )
-from app.services import LLMRouter, ApprovalService, NotificationService, SecretsService
+from app.services import (
+    LLMRouter,
+    ApprovalService,
+    NotificationService,
+    SecretsService,
+    estimate_run_cost,
+    get_current_pricing,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -71,6 +78,12 @@ class AskRequest(BaseModel):
 
 
 class RunAgentRequest(BaseModel):
+    project_id: Optional[int] = None
+    agent_id: Optional[int] = None
+    inputs: dict = {}
+
+
+class EstimateCostRequest(BaseModel):
     project_id: Optional[int] = None
     agent_id: Optional[int] = None
     inputs: dict = {}
@@ -182,6 +195,44 @@ async def get_project(project_id: int, session: Session = Depends(get_session)):
     }
 
 
+@app.post("/api/estimate-cost")
+async def estimate_cost(
+    request: EstimateCostRequest,
+    session: Session = Depends(get_session),
+):
+    """
+    Estimate the cost of running an agent before execution.
+    """
+    logger.info(f"Estimating cost: project={request.project_id}, agent={request.agent_id}")
+
+    # Get agent spec
+    agent_spec = None
+
+    if request.agent_id:
+        agent = session.get(Agent, request.agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        agent_spec = agent.agent_spec
+    elif request.project_id:
+        project = session.get(Project, request.project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        agent_spec = project.agent_spec
+    else:
+        raise HTTPException(status_code=400, detail="Must provide project_id or agent_id")
+
+    if not agent_spec:
+        raise HTTPException(status_code=400, detail="No agent spec available")
+
+    # Estimate cost
+    input_text = str(request.inputs)
+    cost_estimate = await estimate_run_cost(agent_spec, input_text)
+
+    logger.info(f"Estimated cost: ${cost_estimate['total_estimated_cost']}")
+
+    return cost_estimate
+
+
 @app.post("/api/run")
 async def run_agent(
     request: RunAgentRequest,
@@ -214,12 +265,25 @@ async def run_agent(
     if not agent_spec:
         raise HTTPException(status_code=400, detail="No agent spec available")
 
+    # Estimate cost
+    input_text = str(request.inputs)
+    try:
+        cost_estimate = await estimate_run_cost(agent_spec, input_text)
+        estimated_cost = cost_estimate["total_estimated_cost"]
+        cost_breakdown = cost_estimate
+    except Exception as e:
+        logger.warning(f"Failed to estimate cost: {e}")
+        estimated_cost = None
+        cost_breakdown = None
+
     # Create run
     run = Run(
         agent_id=agent_id,
         project_id=project_id,
         status=RunStatus.QUEUED,
         inputs=request.inputs,
+        cost_estimate=estimated_cost,
+        cost_breakdown=cost_breakdown,
     )
     session.add(run)
     session.commit()
@@ -229,12 +293,13 @@ async def run_agent(
     from workers.runner import run_agent_job
     background_tasks.add_task(run_agent_job, run.id)
 
-    logger.info(f"Created run {run.id}")
+    logger.info(f"Created run {run.id} with estimated cost ${estimated_cost}")
 
     return {
         "run_id": run.id,
         "status": run.status,
-        "message": "Agent execution queued"
+        "message": "Agent execution queued",
+        "cost_estimate": estimated_cost,
     }
 
 
@@ -366,6 +431,10 @@ async def get_run(run_id: int, session: Session = Depends(get_session)):
         "error": run.error,
         "started_at": run.started_at,
         "completed_at": run.completed_at,
+        "cost_estimate": run.cost_estimate,
+        "actual_cost": run.actual_cost,
+        "cost_breakdown": run.cost_breakdown,
+        "total_tokens": run.total_tokens,
         "artifacts": [
             {
                 "id": artifact.id,
@@ -402,6 +471,15 @@ async def update_secrets(request: UpdateSecretsRequest):
         "success": True,
         "message": f"Updated {len(request.secrets)} secrets"
     }
+
+
+@app.get("/api/pricing")
+async def get_pricing():
+    """
+    Get current pricing for all supported LLM models.
+    """
+    pricing = await get_current_pricing()
+    return pricing
 
 
 if __name__ == "__main__":

@@ -281,6 +281,8 @@ async def run_agent_job(run_id: int):
                 "artifacts": [],
                 "step_count": 0,
                 "errors": [],
+                "token_usage": [],
+                "total_cost": 0.0,
             }
 
             final_state = await graph.ainvoke(initial_state)
@@ -288,6 +290,39 @@ async def run_agent_job(run_id: int):
             # Update run with results
             run.outputs = final_state.get("outputs", {})
             run.logs += f"\nCompleted {final_state.get('step_count', 0)} steps.\n"
+
+            # Save actual cost information
+            token_usage = final_state.get("token_usage", [])
+            total_cost = final_state.get("total_cost", 0.0)
+
+            if token_usage:
+                # Calculate total tokens
+                total_tokens = sum(
+                    usage.get("usage", {}).get("total_tokens", 0)
+                    for usage in token_usage
+                )
+
+                run.actual_cost = total_cost
+                run.total_tokens = total_tokens
+
+                # Store detailed breakdown
+                if run.cost_breakdown:
+                    run.cost_breakdown["actual"] = {
+                        "total_cost": total_cost,
+                        "total_tokens": total_tokens,
+                        "breakdown": token_usage,
+                    }
+                else:
+                    run.cost_breakdown = {
+                        "actual": {
+                            "total_cost": total_cost,
+                            "total_tokens": total_tokens,
+                            "breakdown": token_usage,
+                        }
+                    }
+
+                run.logs += f"\nActual cost: ${total_cost:.4f} ({total_tokens} tokens)\n"
+                logger.info(f"Run {run_id} actual cost: ${total_cost:.4f}")
 
             # Save artifacts
             for artifact_data in final_state.get("artifacts", []):

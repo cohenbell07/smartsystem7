@@ -123,6 +123,12 @@ class Run(SQLModel, table=True):
     logs: Optional[str] = None  # Concatenated logs
     error: Optional[str] = None
 
+    # Cost tracking
+    cost_estimate: Optional[float] = None  # Estimated cost in USD before run
+    actual_cost: Optional[float] = None  # Actual cost in USD after run
+    cost_breakdown: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # Detailed cost info
+    total_tokens: Optional[int] = None  # Total tokens used (input + output)
+
     # Timing
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
