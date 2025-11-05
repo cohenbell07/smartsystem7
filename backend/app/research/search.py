@@ -1,5 +1,6 @@
 """
-Web search module supporting multiple providers (Bing, SerpAPI).
+Web search module supporting multiple providers.
+Default: SerpAPI with Bing engine.
 """
 
 import os
@@ -10,7 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
-SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "bing")
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "serpapi")
 BING_API_KEY = os.getenv("BING_SEARCH_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
@@ -64,16 +65,16 @@ async def search_bing(query: str, count: int = 50) -> List[SearchResult]:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 async def search_serpapi(query: str, count: int = 50) -> List[SearchResult]:
-    """Search using SerpAPI."""
+    """Search using SerpAPI with Bing engine."""
     if not SERPAPI_KEY:
         logger.warning("SERPAPI_KEY not set, returning empty results")
         return []
 
-    url = "https://serpapi.com/search"
+    url = "https://serpapi.com/search.json"
     params = {
         "q": query,
         "api_key": SERPAPI_KEY,
-        "engine": "google",
+        "engine": "bing",
         "num": min(count, 100),
     }
 
@@ -109,8 +110,8 @@ async def search_web(
 
     Args:
         query: Search query
-        count: Number of results to return (max 50 for Bing, 100 for SerpAPI)
-        provider: Override default provider ("bing" or "serpapi")
+        count: Number of results to return (max 50 for Bing API, 100 for SerpAPI)
+        provider: Override default provider ("bing" or "serpapi", default: "serpapi")
 
     Returns:
         List of search results with title, url, and snippet

@@ -32,10 +32,10 @@ OPENAI_API_KEY=sk-...
 # or
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Optional but recommended
-BING_SEARCH_API_KEY=...
-# or
+# Search API (recommended - SerpAPI is default with Bing engine)
 SERPAPI_KEY=...
+# Legacy option (for direct Bing API v7 access)
+BING_SEARCH_API_KEY=...
 ```
 
 ### 3. Install Dependencies
@@ -220,12 +220,10 @@ Then restart the backend.
 Add a search API key to `.env`:
 
 ```bash
-BING_SEARCH_API_KEY=...
-# or
 SERPAPI_KEY=...
 ```
 
-Without these, the research phase will have limited data.
+The system now uses SerpAPI with Bing engine by default. Without this, the research phase will have limited data.
 
 ---
 
@@ -295,15 +293,17 @@ See [README.md](./README.md#production-deployment) for deployment guides:
 2. Create new API key
 3. Copy to `.env` as `ANTHROPIC_API_KEY=sk-ant-...`
 
-### Bing Search
-1. Go to Azure Portal
-2. Create Bing Search resource
-3. Copy key to `.env` as `BING_SEARCH_API_KEY=...`
-
-### SerpAPI (Alternative)
+### SerpAPI (Recommended - Default)
 1. Go to https://serpapi.com/
-2. Sign up for free tier
+2. Sign up for free tier (100 searches/month)
 3. Copy key to `.env` as `SERPAPI_KEY=...`
+4. Uses Bing search engine by default
+
+### Bing Search (Legacy)
+1. Go to Azure Portal
+2. Create Bing Search v7 resource
+3. Copy key to `.env` as `BING_SEARCH_API_KEY=...`
+4. Add `SEARCH_PROVIDER=bing` to `.env`
 
 ---
 
