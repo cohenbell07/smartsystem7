@@ -56,13 +56,28 @@ This will:
 make db
 ```
 
-### 5. Seed Demo Data (Optional)
+### 5. Configure Vector Store (Optional)
+
+The system uses ChromaDB for vector-based agent memory. It's local, free, and auto-creates on first use.
+
+Add to `.env` to customize the storage location:
+
+```bash
+CHROMA_DB_PATH=~/Documents/smartsystem7/chroma_data
+```
+
+**Note**:
+- Folder auto-created on first use
+- Delete the folder to reset memory
+- Default location is `./chroma_data` if not specified
+
+### 6. Seed Demo Data (Optional)
 
 ```bash
 make seed
 ```
 
-### 6. Run Everything
+### 7. Run Everything
 
 ```bash
 make dev
@@ -73,7 +88,7 @@ This starts:
 - **Frontend**: http://localhost:3000
 - **Worker**: Background job processor
 
-### 7. Open Your Browser
+### 8. Open Your Browser
 
 Visit http://localhost:3000 and ask your first question!
 
