@@ -77,7 +77,7 @@ class ResearchSource(SQLModel, table=True):
     title: Optional[str] = None
     content: Optional[str] = None  # Extracted text
     content_hash: Optional[str] = None  # For deduplication
-    metadata: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    meta_data: Optional[dict] = Field(default=None, sa_column=Column("metadata", JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -149,7 +149,7 @@ class Artifact(SQLModel, table=True):
     name: str
     artifact_type: str  # "markdown", "json", "code", "image", etc.
     content: str
-    metadata: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    meta_data: Optional[dict] = Field(default=None, sa_column=Column("metadata", JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

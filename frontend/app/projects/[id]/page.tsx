@@ -29,6 +29,11 @@ export default function ProjectPage() {
       return
     }
 
+    if (!data) {
+      alert('Project data not loaded')
+      return
+    }
+
     setSavingAgent(true)
     try {
       await saveAgent(projectId, agentName, data.question)

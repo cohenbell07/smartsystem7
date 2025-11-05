@@ -4,14 +4,33 @@ Research synthesis module using LLMs to create briefs with citations.
 
 import logging
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Lazy-loaded clients (initialized when needed)
+_openai_client: Optional[AsyncOpenAI] = None
+_anthropic_client: Optional[AsyncAnthropic] = None
+
+def get_openai_client() -> Optional[AsyncOpenAI]:
+    """Get or create OpenAI client."""
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            _openai_client = AsyncOpenAI(api_key=api_key)
+    return _openai_client
+
+def get_anthropic_client() -> Optional[AsyncAnthropic]:
+    """Get or create Anthropic client."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if api_key:
+            _anthropic_client = AsyncAnthropic(api_key=api_key)
+    return _anthropic_client
 
 DEFAULT_LLM = os.getenv("DEFAULT_LLM", "gpt-4o-mini")
 MAX_CONTENT_LENGTH = int(os.getenv("RESEARCH_CONTENT_LIMIT", "100000"))
@@ -87,8 +106,12 @@ async def synthesize_with_gpt(question: str, sources_text: str, prompt_template:
     Returns:
         Markdown synthesis with inline citations
     """
+    client = get_openai_client()
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
     try:
-        response = await openai_client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=DEFAULT_LLM if DEFAULT_LLM.startswith("gpt") else "gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_template},
@@ -122,8 +145,12 @@ async def synthesize_with_claude(question: str, sources_text: str, prompt_templa
     Returns:
         Markdown synthesis with inline citations
     """
+    client = get_anthropic_client()
+    if not client:
+        raise ValueError("Anthropic API key not configured")
+    
     try:
-        response = await anthropic_client.messages.create(
+        response = await client.messages.create(
             model=DEFAULT_LLM if DEFAULT_LLM.startswith("claude") else "claude-3-5-sonnet-20241022",
             max_tokens=4000,
             system=prompt_template,

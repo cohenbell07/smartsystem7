@@ -196,6 +196,13 @@ export async function listAgents() {
 }
 
 /**
+ * Get all agents (alias for listAgents)
+ */
+export async function getAgents() {
+  return listAgents()
+}
+
+/**
  * Get agent details
  */
 export async function getAgent(agentId: number) {
@@ -203,6 +210,36 @@ export async function getAgent(agentId: number) {
 
   if (!res.ok) {
     throw new Error('Failed to fetch agent')
+  }
+
+  return res.json()
+}
+
+/**
+ * Get secrets (API keys)
+ */
+export async function getSecrets() {
+  const res = await fetch(`${API_BASE}/api/settings/secrets`)
+
+  if (!res.ok) {
+    throw new Error('Failed to fetch secrets')
+  }
+
+  return res.json()
+}
+
+/**
+ * Update secrets (API keys)
+ */
+export async function updateSecrets(secrets: Record<string, string>) {
+  const res = await fetch(`${API_BASE}/api/settings/secrets`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ secrets }),
+  })
+
+  if (!res.ok) {
+    throw new Error('Failed to update secrets')
   }
 
   return res.json()

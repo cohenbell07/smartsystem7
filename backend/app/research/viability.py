@@ -5,14 +5,33 @@ Business viability scoring module using LLMs.
 import logging
 import os
 import json
-from typing import Dict
+from typing import Dict, Optional
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Lazy-loaded clients (initialized when needed)
+_openai_client: Optional[AsyncOpenAI] = None
+_anthropic_client: Optional[AsyncAnthropic] = None
+
+def get_openai_client() -> Optional[AsyncOpenAI]:
+    """Get or create OpenAI client."""
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            _openai_client = AsyncOpenAI(api_key=api_key)
+    return _openai_client
+
+def get_anthropic_client() -> Optional[AsyncAnthropic]:
+    """Get or create Anthropic client."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if api_key:
+            _anthropic_client = AsyncAnthropic(api_key=api_key)
+    return _anthropic_client
 
 DEFAULT_LLM = os.getenv("DEFAULT_LLM", "gpt-4o-mini")
 
@@ -72,8 +91,12 @@ Return ONLY valid JSON in this exact format:
 }
 """
 
+    client = get_openai_client()
+    if not client:
+        raise ValueError("OpenAI API key not configured")
+    
     try:
-        response = await openai_client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-4o" if DEFAULT_LLM.startswith("gpt-4o") else "gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_template},
@@ -139,8 +162,12 @@ Return ONLY valid JSON in this exact format:
 }
 """
 
+    client = get_anthropic_client()
+    if not client:
+        raise ValueError("Anthropic API key not configured")
+    
     try:
-        response = await anthropic_client.messages.create(
+        response = await client.messages.create(
             model="claude-3-5-sonnet-20241022" if DEFAULT_LLM.startswith("claude-3-5-sonnet") else "claude-3-5-haiku-20241022",
             max_tokens=2000,
             system=prompt_template,

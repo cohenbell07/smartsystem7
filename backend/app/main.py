@@ -3,13 +3,18 @@ Agent Factory - FastAPI Main Application
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+
+# Load environment variables from .env file
+load_dotenv()
 
 from app.database import create_db_and_tables, get_session
 from app.models import (
@@ -43,6 +48,51 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     logger.info("Starting Agent Factory...")
+    
+    # Validate environment variables
+    required_keys = {
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
+        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
+    }
+    optional_keys = {
+        "BING_SEARCH_API_KEY": os.getenv("BING_SEARCH_API_KEY"),
+        "SERPAPI_KEY": os.getenv("SERPAPI_KEY"),
+        "REDIS_URL": os.getenv("REDIS_URL"),
+        "DATABASE_URL": os.getenv("DATABASE_URL"),
+    }
+    
+    # Check if at least one LLM key is present
+    has_openai = bool(required_keys["OPENAI_API_KEY"])
+    has_anthropic = bool(required_keys["ANTHROPIC_API_KEY"])
+    
+    if not has_openai and not has_anthropic:
+        logger.warning("⚠️  No LLM API keys found! Set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env file")
+    else:
+        if has_openai:
+            logger.info("✓ OPENAI_API_KEY found")
+        if has_anthropic:
+            logger.info("✓ ANTHROPIC_API_KEY found")
+    
+    # Check optional keys
+    if not optional_keys["BING_SEARCH_API_KEY"] and not optional_keys["SERPAPI_KEY"]:
+        logger.warning("⚠️  No search API keys found! Set BING_SEARCH_API_KEY or SERPAPI_KEY for better research results")
+    else:
+        if optional_keys["BING_SEARCH_API_KEY"]:
+            logger.info("✓ BING_SEARCH_API_KEY found")
+        if optional_keys["SERPAPI_KEY"]:
+            logger.info("✓ SERPAPI_KEY found")
+    
+    if optional_keys["REDIS_URL"]:
+        logger.info("✓ REDIS_URL found")
+    else:
+        logger.info("ℹ️  REDIS_URL not set (optional, for background jobs)")
+    
+    if optional_keys["DATABASE_URL"]:
+        db_info = optional_keys["DATABASE_URL"].split("@")[-1] if "@" in optional_keys["DATABASE_URL"] else "configured"
+        logger.info(f"✓ DATABASE_URL found: {db_info}")
+    else:
+        logger.info("ℹ️  Using default SQLite database")
+    
     create_db_and_tables()
     yield
     logger.info("Shutting down Agent Factory...")
@@ -455,6 +505,15 @@ async def get_secrets():
 
     return {
         "secrets": secrets,
+    }
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get general settings."""
+    return {
+        "api_url": os.getenv("NEXT_PUBLIC_API_URL", "http://localhost:8000"),
+        "app_name": os.getenv("NEXT_PUBLIC_APP_NAME", "Agent Factory"),
     }
 
 
