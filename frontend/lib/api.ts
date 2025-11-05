@@ -244,3 +244,20 @@ export async function updateSecrets(secrets: Record<string, string>) {
 
   return res.json()
 }
+
+/**
+ * Validate API keys for an agent
+ */
+export async function validateAgentKeys(projectId?: number, agentId?: number) {
+  const res = await fetch(`${API_BASE}/api/agents/validate-keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId, agent_id: agentId }),
+  })
+
+  if (!res.ok) {
+    throw new Error('Failed to validate API keys')
+  }
+
+  return res.json()
+}

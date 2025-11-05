@@ -51,15 +51,87 @@ export default function SettingsPage() {
 
   const currentSecrets = data.secrets || {}
 
-  const secretFields = [
-    { key: 'OPENAI_API_KEY', label: 'OpenAI API Key', placeholder: 'sk-...' },
-    { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', placeholder: 'sk-ant-...' },
-    { key: 'BING_SEARCH_API_KEY', label: 'Bing Search API Key', placeholder: 'Optional' },
-    { key: 'SERPAPI_KEY', label: 'SerpAPI Key', placeholder: 'Optional' },
-    { key: 'GITHUB_TOKEN', label: 'GitHub Token', placeholder: 'ghp_...' },
-    { key: 'SMTP_USER', label: 'SMTP User (Email)', placeholder: 'you@gmail.com' },
-    { key: 'SMTP_PASSWORD', label: 'SMTP Password', placeholder: 'App password' },
-    { key: 'DISCORD_WEBHOOK_URL', label: 'Discord Webhook URL', placeholder: 'https://discord.com/api/webhooks/...' },
+  const secretGroups = [
+    {
+      title: 'AI Models',
+      description: 'At least one is required for agent execution',
+      fields: [
+        {
+          key: 'OPENAI_API_KEY',
+          label: 'OpenAI API Key',
+          placeholder: 'sk-...',
+          required: false,
+          url: 'https://platform.openai.com/api-keys'
+        },
+        {
+          key: 'ANTHROPIC_API_KEY',
+          label: 'Anthropic API Key',
+          placeholder: 'sk-ant-...',
+          required: false,
+          url: 'https://console.anthropic.com/settings/keys'
+        },
+      ]
+    },
+    {
+      title: 'Version Control & Code',
+      description: 'Required for CodeArchitect and GitHub operations',
+      fields: [
+        {
+          key: 'GITHUB_TOKEN',
+          label: 'GitHub Personal Access Token',
+          placeholder: 'ghp_...',
+          required: false,
+          url: 'https://github.com/settings/tokens'
+        },
+      ]
+    },
+    {
+      title: 'Web Search',
+      description: 'Recommended for research agents',
+      fields: [
+        {
+          key: 'SERPAPI_KEY',
+          label: 'SerpAPI Key (Recommended)',
+          placeholder: 'Optional',
+          required: false,
+          url: 'https://serpapi.com/manage-api-key'
+        },
+        {
+          key: 'BING_SEARCH_API_KEY',
+          label: 'Bing Search API Key',
+          placeholder: 'Optional',
+          required: false,
+          url: 'https://www.microsoft.com/en-us/bing/apis/bing-web-search-api'
+        },
+      ]
+    },
+    {
+      title: 'Notifications',
+      description: 'Optional - for email and Discord notifications',
+      fields: [
+        {
+          key: 'SMTP_USER',
+          label: 'SMTP User (Email)',
+          placeholder: 'you@gmail.com',
+          required: false,
+          url: 'https://support.google.com/mail/answer/185833'
+        },
+        {
+          key: 'SMTP_PASSWORD',
+          label: 'SMTP Password (App Password)',
+          placeholder: 'App password',
+          required: false,
+          url: 'https://support.google.com/mail/answer/185833'
+        },
+        {
+          key: 'DISCORD_WEBHOOK_URL',
+          label: 'Discord Webhook URL',
+          placeholder: 'https://discord.com/api/webhooks/...',
+          required: false,
+          url: 'https://support.discord.com/hc/en-us/articles/228383668'
+        },
+      ]
+    }
   ]
 
   return (
@@ -78,38 +150,54 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-6">API Keys</h2>
+      <div className="space-y-6">
+        {secretGroups.map((group) => (
+          <div key={group.title} className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-xl font-semibold mb-2">{group.title}</h2>
+            <p className="text-sm text-gray-600 mb-6">{group.description}</p>
 
-        <div className="space-y-6">
-          {secretFields.map(({ key, label, placeholder }) => (
-            <div key={key}>
-              <label htmlFor={key} className="block text-sm font-medium text-gray-700 mb-2">
-                {label}
-              </label>
-              <div className="flex gap-3">
-                <input
-                  id={key}
-                  type="password"
-                  placeholder={currentSecrets[key] || placeholder}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
-                  value={secrets[key] || ''}
-                  onChange={(e) => setSecrets({ ...secrets, [key]: e.target.value })}
-                />
-                {currentSecrets[key] && (
-                  <div className="flex items-center px-3 py-2 bg-green-50 text-green-700 text-sm rounded-lg">
-                    ✓ Set
+            <div className="space-y-5">
+              {group.fields.map(({ key, label, placeholder, url }) => (
+                <div key={key}>
+                  <label htmlFor={key} className="block text-sm font-medium text-gray-700 mb-2">
+                    {label}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id={key}
+                      type="password"
+                      placeholder={currentSecrets[key] || placeholder}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
+                      value={secrets[key] || ''}
+                      onChange={(e) => setSecrets({ ...secrets, [key]: e.target.value })}
+                    />
+                    {currentSecrets[key] ? (
+                      <div className="flex items-center px-3 py-2 bg-green-50 text-green-700 text-sm rounded-lg whitespace-nowrap">
+                        ✓ Configured
+                      </div>
+                    ) : (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center px-3 py-2 bg-blue-50 text-blue-700 text-sm rounded-lg hover:bg-blue-100 transition-colors whitespace-nowrap"
+                      >
+                        Get Key →
+                      </a>
+                    )}
                   </div>
-                )}
-              </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
+      </div>
 
-        <div className="mt-8 pt-6 border-t flex items-center justify-between">
+      <div className="mt-6 bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-between">
           <div className="text-sm text-gray-500">
             {saved && (
-              <span className="text-green-600">✓ Secrets saved successfully</span>
+              <span className="text-green-600 font-medium">✓ API keys saved successfully</span>
             )}
           </div>
           <button
@@ -120,24 +208,6 @@ export default function SettingsPage() {
             {saving ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
-      </div>
-
-      <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <h3 className="font-medium text-blue-900 mb-2">Getting API Keys</h3>
-        <ul className="text-sm text-blue-700 space-y-1">
-          <li>
-            <strong>OpenAI:</strong> <a href="https://platform.openai.com/api-keys" target="_blank" className="underline">platform.openai.com/api-keys</a>
-          </li>
-          <li>
-            <strong>Anthropic:</strong> <a href="https://console.anthropic.com/" target="_blank" className="underline">console.anthropic.com</a>
-          </li>
-          <li>
-            <strong>Bing Search:</strong> <a href="https://azure.microsoft.com/en-us/services/cognitive-services/bing-web-search-api/" target="_blank" className="underline">Azure Portal</a>
-          </li>
-          <li>
-            <strong>GitHub:</strong> Settings → Developer settings → Personal access tokens
-          </li>
-        </ul>
       </div>
     </div>
   )

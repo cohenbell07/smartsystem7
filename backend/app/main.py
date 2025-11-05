@@ -315,6 +315,23 @@ async def run_agent(
     if not agent_spec:
         raise HTTPException(status_code=400, detail="No agent spec available")
 
+    # Validate API keys
+    from app.services import APIKeyValidator
+    validator = APIKeyValidator()
+    is_valid, missing_keys, key_status = validator.validate_agent_keys(agent_spec)
+
+    if not is_valid:
+        logger.warning(f"Cannot run agent: missing API keys {missing_keys}")
+        report = validator.get_validation_report(agent_spec)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Missing required API keys",
+                "missing_keys": missing_keys,
+                "validation_report": report
+            }
+        )
+
     # Estimate cost
     input_text = str(request.inputs)
     try:
@@ -530,6 +547,42 @@ async def update_secrets(request: UpdateSecretsRequest):
         "success": True,
         "message": f"Updated {len(request.secrets)} secrets"
     }
+
+
+@app.post("/api/agents/validate-keys")
+async def validate_agent_keys(request: EstimateCostRequest, session: Session = Depends(get_session)):
+    """
+    Validate that all required API keys are present for an agent.
+    Returns validation status and missing keys with instructions.
+    """
+    from app.services import APIKeyValidator
+
+    # Get agent spec
+    agent_spec = None
+
+    if request.agent_id:
+        agent = session.get(Agent, request.agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        agent_spec = agent.agent_spec
+    elif request.project_id:
+        project = session.get(Project, request.project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        agent_spec = project.agent_spec
+    else:
+        raise HTTPException(status_code=400, detail="Must provide project_id or agent_id")
+
+    if not agent_spec:
+        raise HTTPException(status_code=400, detail="No agent spec available")
+
+    # Validate keys
+    validator = APIKeyValidator()
+    report = validator.get_validation_report(agent_spec)
+
+    logger.info(f"API key validation: {report['message']}")
+
+    return report
 
 
 @app.get("/api/pricing")
