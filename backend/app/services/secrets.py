@@ -47,13 +47,14 @@ class SecretsService:
 
         return None
 
-    def set_secret(self, key: str, value: str) -> bool:
+    def set_secret(self, key: str, value: str, save_to_env: bool = True) -> bool:
         """
         Set a secret value.
 
         Args:
             key: Secret key
             value: Secret value
+            save_to_env: If True, also save to .env file
 
         Returns:
             True if successful
@@ -83,12 +84,65 @@ class SecretsService:
                 session.add(secret)
                 session.commit()
 
+                # Save to .env file if requested
+                if save_to_env:
+                    self._save_to_env_file(key, value)
+
+                # Update runtime environment variable
+                os.environ[key] = value
+
                 logger.info(f"Set secret: {key}")
                 return True
 
         except Exception as e:
             logger.error(f"Failed to set secret {key}: {e}")
             return False
+
+    def _save_to_env_file(self, key: str, value: str):
+        """
+        Save or update a key in the .env file.
+
+        Args:
+            key: Environment variable key
+            value: Environment variable value
+        """
+        try:
+            # Find .env file (typically in the backend directory)
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+
+            # Read existing .env content
+            env_lines = []
+            key_exists = False
+
+            if os.path.exists(env_path):
+                with open(env_path, 'r') as f:
+                    env_lines = f.readlines()
+
+                # Update existing key or mark that it needs to be added
+                for i, line in enumerate(env_lines):
+                    if line.strip().startswith(f"{key}="):
+                        # Update existing line
+                        env_lines[i] = f"{key}={value}\n"
+                        key_exists = True
+                        break
+
+            # Add new key if it doesn't exist
+            if not key_exists:
+                # Add newline before if file doesn't end with one
+                if env_lines and not env_lines[-1].endswith('\n'):
+                    env_lines[-1] += '\n'
+                env_lines.append(f"{key}={value}\n")
+
+            # Write back to .env file
+            with open(env_path, 'w') as f:
+                f.writelines(env_lines)
+
+            logger.info(f"Saved {key} to .env file at {env_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to save {key} to .env file: {e}")
+            # Don't fail the whole operation if .env update fails
+            pass
 
     def get_all_secrets(self, redact: bool = True) -> Dict[str, str]:
         """
