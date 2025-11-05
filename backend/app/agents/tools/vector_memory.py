@@ -14,25 +14,30 @@ logger = logging.getLogger(__name__)
 class VectorMemoryTool:
     """Tool for vector-based memory storage and retrieval."""
 
-    def __init__(self, collection_name: str = "agent_memory", persist_directory: str = "./chroma_db"):
+    def __init__(self, collection_name: str = "agent-memory"):
         self.collection_name = collection_name
-        self.persist_directory = persist_directory
 
-        # Initialize Chroma client
+        # Get persist directory from env or use default
+        persist_dir = os.getenv("CHROMA_DB_PATH", "./chroma_data")
+
+        # Ensure directory exists
+        os.makedirs(persist_dir, exist_ok=True)
+
+        # Initialize Chroma client with new Settings API
         self.client = chromadb.Client(
             Settings(
-                chroma_db_impl="duckdb+parquet",
-                persist_directory=persist_directory,
+                persist_directory=persist_dir,
+                anonymized_telemetry=False
             )
         )
 
         # Get or create collection
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            metadata={"description": "Long-term agent memory"},
+            metadata={"source": "smartsystem7"}
         )
 
-        logger.info(f"Initialized vector memory: {collection_name}")
+        logger.info(f"Initialized vector memory: {collection_name} at {persist_dir}")
 
     async def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -141,3 +146,41 @@ class VectorMemoryTool:
             "success": True,
             "id": doc_id,
         }
+
+    def upsert(self, ids: List[str], embeddings: Optional[List] = None, documents: Optional[List[str]] = None, metadatas: Optional[List[Dict]] = None):
+        """
+        Upsert documents into the vector store.
+
+        Args:
+            ids: List of document IDs
+            embeddings: Optional list of embeddings (if None, will be auto-generated)
+            documents: Optional list of document texts
+            metadatas: Optional list of metadata dicts
+        """
+        self.collection.upsert(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas
+        )
+        logger.info(f"Upserted {len(ids)} documents")
+
+    def query(self, query_texts: Optional[List[str]] = None, query_embeddings: Optional[List] = None, n_results: int = 5, where: Optional[Dict] = None) -> Dict:
+        """
+        Query the vector store.
+
+        Args:
+            query_texts: Optional list of query texts
+            query_embeddings: Optional list of query embeddings
+            n_results: Number of results to return (default: 5)
+            where: Optional metadata filter
+
+        Returns:
+            Dict with query results
+        """
+        return self.collection.query(
+            query_texts=query_texts,
+            query_embeddings=query_embeddings,
+            n_results=n_results,
+            where=where
+        )

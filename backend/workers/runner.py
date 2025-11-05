@@ -30,6 +30,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _init_vector_store():
+    """Initialize vector store to ensure it's ready before agent jobs begin."""
+    try:
+        from app.agents.tools.vector_memory import VectorMemoryTool
+        VectorMemoryTool()
+        logger.info("Vector store initialized successfully.")
+    except Exception as e:
+        logger.error(f"Vector store initialization failed: {e}")
+        raise
+
+
 async def run_research_job(project_id: int):
     """
     Execute research pipeline for a project.
@@ -356,6 +367,9 @@ async def run_agent_job(run_id: int):
 if __name__ == "__main__":
     logger.info("Worker runner started (for development only)")
     logger.info("In production, use RQ or Celery for job processing")
+
+    # Initialize vector store on startup
+    _init_vector_store()
 
     # This is a simple loop for development
     # In production, you'd use RQ worker or Celery worker
