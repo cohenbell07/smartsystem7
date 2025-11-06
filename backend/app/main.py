@@ -158,6 +158,11 @@ class AgentPromptRequest(BaseModel):
     prompt: str
 
 
+class AgentRunRequest(BaseModel):
+    prompt: Optional[str] = None
+    inputs: Optional[dict] = None
+
+
 # Routes
 
 @app.get("/")
@@ -480,6 +485,77 @@ async def get_agent(agent_id: int, session: Session = Depends(get_session)):
     }
 
 
+@app.post("/api/agents/{agent_id}/run")
+async def run_saved_agent(
+    agent_id: int,
+    request: AgentRunRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """
+    Execute a saved agent with optional prompt and inputs.
+
+    This endpoint supports both:
+    - Prompt-based execution (uses Agent Manager runtime with sub-agents)
+    - Input-based execution (direct graph execution)
+    """
+    logger.info(f"Running saved agent {agent_id}")
+
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Validate API keys
+    from app.services import APIKeyValidator
+    validator = APIKeyValidator()
+    is_valid, missing_keys, key_status = validator.validate_agent_keys(agent.agent_spec)
+
+    if not is_valid:
+        logger.warning(f"Cannot run agent: missing API keys {missing_keys}")
+        report = validator.get_validation_report(agent.agent_spec)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Missing required API keys",
+                "missing_keys": missing_keys,
+                "validation_report": report
+            }
+        )
+
+    # Create run record
+    run = Run(
+        agent_id=agent_id,
+        status=RunStatus.QUEUED,
+        prompt=request.prompt,
+        inputs=request.inputs,
+        created_at=datetime.utcnow(),
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    # Choose execution strategy based on whether prompt is provided
+    if request.prompt:
+        # Use Agent Manager runtime for prompt-based execution
+        logger.info(f"Using Agent Manager runtime for agent {agent_id} with prompt")
+        from workers.runner import run_agent_prompt_job
+        background_tasks.add_task(run_agent_prompt_job, run.id)
+    else:
+        # Use direct graph execution for input-based execution
+        logger.info(f"Using direct graph execution for agent {agent_id} with inputs")
+        from workers.runner import run_agent_job
+        background_tasks.add_task(run_agent_job, run.id)
+
+    return {
+        "run_id": run.id,
+        "agent_id": agent.id,
+        "status": run.status,
+        "message": "Agent execution queued",
+        "execution_mode": "prompt" if request.prompt else "inputs"
+    }
+
+
 @app.post("/api/agents/{agent_id}/prompt")
 async def run_agent_with_prompt(
     agent_id: int,
@@ -490,6 +566,9 @@ async def run_agent_with_prompt(
     """
     Execute an agent with a direct prompt using the Agent Manager runtime.
     This enables multi-agent orchestration with sub-agents and memory recall.
+
+    Note: This endpoint is maintained for backward compatibility.
+    Use POST /api/agents/{agent_id}/run instead.
     """
     logger.info(f"Running agent {agent_id} with prompt: {request.prompt[:100]}...")
 
