@@ -133,6 +133,8 @@ class Run(SQLModel, table=True):
     actual_cost: Optional[float] = None  # Actual cost in USD after run
     cost_breakdown: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # Detailed cost info
     total_tokens: Optional[int] = None  # Total tokens used (input + output)
+    total_cost: Optional[float] = None  # Backward compatible field mirroring actual cost for prompts
+    token_usage: Optional[list[dict]] = Field(default=None, sa_column=Column(JSON))  # Step-level token usage
 
     # Timing
     started_at: Optional[datetime] = None
