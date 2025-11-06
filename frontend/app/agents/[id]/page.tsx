@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { getAgent, runAgentWithPrompt, getRun, type Run } from '@/lib/api'
+import {
+  getAgent,
+  runAgentWithPrompt,
+  getRun,
+  getAgentFiles,
+  createAgentRepo,
+  type Run,
+} from '@/lib/api'
+import ApiKeyModal from '@/components/ApiKeyModal'
 
 type Agent = {
   id: number
@@ -12,6 +20,8 @@ type Agent = {
   source_project_id?: number
   run_count: number
   success_count: number
+  repo_url?: string
+  repo_local_path?: string
   created_at: string
   runs: Array<{
     id: number
@@ -22,7 +32,14 @@ type Agent = {
   }>
 }
 
-type TabType = 'run' | 'logs' | 'memory' | 'code'
+type FileItem = {
+  path: string
+  name: string
+  size: number
+  content: string
+}
+
+type TabType = 'run' | 'logs' | 'files' | 'memory' | 'code'
 
 export default function AgentDetailPage() {
   const params = useParams()
@@ -35,6 +52,15 @@ export default function AgentDetailPage() {
   const [currentRun, setCurrentRun] = useState<Run | null>(null)
   const [running, setRunning] = useState(false)
   const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null)
+
+  // API key modal
+  const [showKeyModal, setShowKeyModal] = useState(false)
+  const [missingKeys, setMissingKeys] = useState<any[]>([])
+
+  // Files
+  const [files, setFiles] = useState<FileItem[]>([])
+  const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
+  const [creatingRepo, setCreatingRepo] = useState(false)
 
   useEffect(() => {
     loadAgent()
@@ -54,10 +80,46 @@ export default function AgentDetailPage() {
       setLoading(true)
       const data = await getAgent(parseInt(agentId))
       setAgent(data)
+
+      // Load files if repo exists
+      if (data.repo_url) {
+        loadFiles()
+      }
     } catch (error) {
       console.error('Failed to load agent:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadFiles = async () => {
+    try {
+      const data = await getAgentFiles(parseInt(agentId))
+      setFiles(data.files || [])
+    } catch (error) {
+      console.error('Failed to load files:', error)
+    }
+  }
+
+  const handleCreateRepo = async () => {
+    if (creatingRepo) return
+
+    try {
+      setCreatingRepo(true)
+      await createAgentRepo(parseInt(agentId))
+      await loadAgent()
+      alert('Repository created successfully!')
+    } catch (error: any) {
+      if (error.status === 428) {
+        // Missing GitHub token
+        setMissingKeys(error.missing_with_instructions || [])
+        setShowKeyModal(true)
+      } else {
+        console.error('Failed to create repo:', error)
+        alert('Failed to create repository. Please check your GitHub token.')
+      }
+    } finally {
+      setCreatingRepo(false)
     }
   }
 
@@ -98,10 +160,26 @@ export default function AgentDetailPage() {
       const runData = await getRun(result.run_id)
       setCurrentRun(runData)
       setActiveTab('logs')
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to run agent:', error)
-      alert('Failed to run agent. Please try again.')
-      setRunning(false)
+
+      // Check for 428 status (missing API keys)
+      if (error.status === 428) {
+        setMissingKeys(error.missing_with_instructions || [])
+        setShowKeyModal(true)
+        setRunning(false)
+      } else {
+        alert('Failed to run agent. Please try again.')
+        setRunning(false)
+      }
+    }
+  }
+
+  const handleKeysSuccess = async () => {
+    setShowKeyModal(false)
+    // Retry the run
+    if (prompt.trim()) {
+      setTimeout(() => handleRunPrompt(), 500)
     }
   }
 
@@ -200,6 +278,22 @@ export default function AgentDetailPage() {
                   {currentRun.status}
                 </span>
               </p>
+
+              {/* Cost and Token Display */}
+              {(currentRun.total_cost || currentRun.total_tokens) && (
+                <div className="mt-2 flex gap-4 text-xs">
+                  {currentRun.total_cost && (
+                    <span className="px-2 py-1 bg-green-50 text-green-700 rounded">
+                      💰 Cost: ${currentRun.total_cost.toFixed(4)}
+                    </span>
+                  )}
+                  {currentRun.total_tokens && (
+                    <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">
+                      🔤 Tokens: {currentRun.total_tokens.toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             {running && (
               <div className="flex items-center gap-2 text-blue-600">
@@ -263,6 +357,85 @@ export default function AgentDetailPage() {
             <p className="text-sm text-red-800">{currentRun.error}</p>
           </div>
         )}
+      </div>
+    )
+  }
+
+  const renderFilesTab = () => {
+    if (!agent?.repo_url) {
+      return (
+        <div className="text-center py-8">
+          <p className="text-gray-600 mb-4">
+            This agent doesn't have a GitHub repository yet.
+          </p>
+          <button
+            onClick={handleCreateRepo}
+            disabled={creatingRepo}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            {creatingRepo ? 'Creating Repository...' : 'Create GitHub Repository'}
+          </button>
+        </div>
+      )
+    }
+
+    return (
+      <div className="grid grid-cols-3 gap-4">
+        {/* File List */}
+        <div className="col-span-1 border-r border-gray-200 pr-4">
+          <div className="mb-4">
+            <a
+              href={agent.repo_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 0C4.477 0 0 4.484 0 10.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0110 4.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.31.678.921.678 1.856 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0020 10.017C20 4.484 15.522 0 10 0z" clipRule="evenodd" />
+              </svg>
+              Open on GitHub →
+            </a>
+          </div>
+
+          <div className="space-y-1">
+            {files.length === 0 ? (
+              <p className="text-sm text-gray-500">No files found</p>
+            ) : (
+              files.map((file) => (
+                <button
+                  key={file.path}
+                  onClick={() => setSelectedFile(file)}
+                  className={`w-full text-left px-2 py-1 text-sm rounded hover:bg-gray-100 ${
+                    selectedFile?.path === file.path ? 'bg-blue-50 text-blue-700' : 'text-gray-700'
+                  }`}
+                >
+                  📄 {file.name}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* File Content */}
+        <div className="col-span-2">
+          {selectedFile ? (
+            <div>
+              <div className="mb-2 flex justify-between items-center">
+                <h4 className="font-semibold text-gray-900">{selectedFile.path}</h4>
+                <span className="text-xs text-gray-500">
+                  {(selectedFile.size / 1024).toFixed(1)} KB
+                </span>
+              </div>
+              <div className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto max-h-[600px]">
+                <pre className="text-sm">{selectedFile.content}</pre>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center text-gray-500 py-8">
+              Select a file to view its contents
+            </div>
+          )}
+        </div>
       </div>
     )
   }
@@ -361,6 +534,14 @@ export default function AgentDetailPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      {/* API Key Modal */}
+      <ApiKeyModal
+        isOpen={showKeyModal}
+        missingKeys={missingKeys}
+        onClose={() => setShowKeyModal(false)}
+        onSuccess={handleKeysSuccess}
+      />
+
       <div className="max-w-6xl mx-auto px-4 py-8">
         {/* Header */}
         <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
@@ -369,6 +550,21 @@ export default function AgentDetailPage() {
               <h1 className="text-3xl font-bold text-gray-900 mb-2">{agent.name}</h1>
               {agent.description && (
                 <p className="text-gray-600">{agent.description}</p>
+              )}
+              {agent.repo_url && (
+                <div className="mt-2">
+                  <a
+                    href={agent.repo_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 0C4.477 0 0 4.484 0 10.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0110 4.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.31.678.921.678 1.856 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0020 10.017C20 4.484 15.522 0 10 0z" clipRule="evenodd" />
+                    </svg>
+                    GitHub Repository
+                  </a>
+                </div>
               )}
             </div>
             <div className="text-right">
@@ -390,6 +586,7 @@ export default function AgentDetailPage() {
               {[
                 { id: 'run', label: 'Run Agent' },
                 { id: 'logs', label: 'Logs & Results' },
+                { id: 'files', label: 'Files' },
                 { id: 'memory', label: 'Memory' },
                 { id: 'code', label: 'View Code' },
               ].map((tab) => (
@@ -411,6 +608,7 @@ export default function AgentDetailPage() {
           <div className="p-6">
             {activeTab === 'run' && renderRunTab()}
             {activeTab === 'logs' && renderLogsTab()}
+            {activeTab === 'files' && renderFilesTab()}
             {activeTab === 'memory' && renderMemoryTab()}
             {activeTab === 'code' && renderCodeTab()}
           </div>

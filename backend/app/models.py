@@ -95,6 +95,10 @@ class Agent(SQLModel, table=True):
     # Links back to original project
     source_project_id: Optional[int] = Field(default=None, foreign_key="projects.id")
 
+    # GitHub repo integration
+    repo_url: Optional[str] = None  # GitHub repository URL
+    repo_local_path: Optional[str] = None  # Local clone path
+
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -192,6 +196,42 @@ class Secret(SQLModel, table=True):
     value: str  # Encrypted in production
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Orchestration(SQLModel, table=True):
+    """Multi-agent orchestration record."""
+
+    __tablename__ = "orchestrations"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    agent_ids: list[int] = Field(sa_column=Column(JSON))  # List of agent IDs to orchestrate
+    prompt: str  # Task prompt
+    strategy: str = Field(default="manager-led")  # "sequential", "parallel", "manager-led"
+
+    status: RunStatus = Field(default=RunStatus.QUEUED)
+
+    # Per-agent progress tracking
+    agent_progress: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # {agent_id: progress_pct}
+    agent_outputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # {agent_id: output}
+
+    # Overall outputs
+    outputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    logs: Optional[str] = None
+    error: Optional[str] = None
+
+    # Cost tracking
+    total_cost: Optional[float] = None
+    total_tokens: Optional[int] = None
+
+    # If orchestration produces a new agent
+    generated_agent_id: Optional[int] = Field(default=None, foreign_key="agents.id")
+
+    # Timing
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    user_id: str = Field(default="dev_user")
 
 
 # Pydantic schemas for API

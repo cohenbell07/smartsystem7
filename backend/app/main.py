@@ -25,6 +25,7 @@ from app.models import (
     RunStatus,
     Artifact,
     ResearchSource,
+    Orchestration,
 )
 from app.services import (
     LLMRouter,
@@ -161,6 +162,20 @@ class AgentPromptRequest(BaseModel):
 class AgentRunRequest(BaseModel):
     prompt: Optional[str] = None
     inputs: Optional[dict] = None
+
+
+class SetKeysRequest(BaseModel):
+    keys: dict[str, str]
+
+
+class CreateRepoRequest(BaseModel):
+    pass  # No body needed, uses agent_id from path
+
+
+class CreateOrchestrationRequest(BaseModel):
+    agent_ids: List[int]
+    prompt: str
+    strategy: str = "manager-led"  # "sequential", "parallel", "manager-led"
 
 
 # Routes
@@ -515,11 +530,11 @@ async def run_saved_agent(
         logger.warning(f"Cannot run agent: missing API keys {missing_keys}")
         report = validator.get_validation_report(agent.agent_spec)
         raise HTTPException(
-            status_code=400,
+            status_code=428,
             detail={
                 "error": "Missing required API keys",
                 "missing_keys": missing_keys,
-                "validation_report": report
+                "missing_with_instructions": report["missing_with_instructions"]
             }
         )
 
@@ -728,6 +743,355 @@ async def get_pricing():
     """
     pricing = await get_current_pricing()
     return pricing
+
+
+@app.get("/api/settings/required_keys")
+async def get_required_keys(agent_id: Optional[int] = None, session: Session = Depends(get_session)):
+    """
+    Get list of required API keys for an agent.
+    Returns missing keys with instructions for obtaining them.
+    """
+    from app.services import APIKeyValidator
+
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id parameter is required")
+
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Validate keys
+    validator = APIKeyValidator()
+    report = validator.get_validation_report(agent.agent_spec)
+
+    return {
+        "valid": report["valid"],
+        "missing_keys": report["missing_keys"],
+        "missing_with_instructions": report["missing_with_instructions"]
+    }
+
+
+@app.post("/api/settings/keys")
+async def set_keys(request: SetKeysRequest):
+    """
+    Save API keys to environment and .env file.
+    Reloads LLM clients to pick up new keys.
+    """
+    from datetime import datetime
+
+    secrets_service = SecretsService()
+    saved_keys = []
+
+    # Save each key
+    for key, value in request.keys.items():
+        if value and value.strip():
+            # Redact from logs
+            logger.info(f"Setting API key: {key}")
+
+            # Save to DB and .env
+            success = secrets_service.set_secret(key, value, save_to_env=True)
+
+            if success:
+                saved_keys.append(key)
+
+    # Reload LLM clients to pick up new keys
+    global llm_router
+    llm_router = LLMRouter()
+
+    logger.info(f"Saved and reloaded {len(saved_keys)} API keys")
+
+    return {
+        "saved": saved_keys,
+        "message": f"Saved {len(saved_keys)} API key(s) and reloaded clients"
+    }
+
+
+@app.post("/api/agents/{agent_id}/repo")
+async def create_agent_repo(
+    agent_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    Create a GitHub repository for an agent and clone it locally.
+    Requires GITHUB_TOKEN in environment.
+    """
+    import subprocess
+    import json
+    from pathlib import Path
+
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Check if repo already exists
+    if agent.repo_url:
+        return {
+            "repo_url": agent.repo_url,
+            "local_path": agent.repo_local_path,
+            "message": "Repository already exists"
+        }
+
+    # Get GitHub token
+    secrets_service = SecretsService()
+    github_token = secrets_service.get_secret("GITHUB_TOKEN")
+
+    if not github_token:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "error": "GitHub token required",
+                "missing_keys": ["GITHUB_TOKEN"],
+                "missing_with_instructions": [{
+                    "key": "GITHUB_TOKEN",
+                    "url": "https://github.com/settings/tokens",
+                    "description": "Generate a Personal Access Token with repo permissions"
+                }]
+            }
+        )
+
+    try:
+        # Create repo name from agent name
+        import re
+        repo_name = f"agent-{re.sub(r'[^a-z0-9-]', '-', agent.name.lower())}"
+
+        # Create GitHub repo using gh CLI or API
+        # Using GitHub API directly
+        import requests
+
+        headers = {
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        # Create repo
+        create_response = requests.post(
+            "https://api.github.com/user/repos",
+            headers=headers,
+            json={
+                "name": repo_name,
+                "description": agent.description or f"Agent: {agent.name}",
+                "private": False,
+                "auto_init": True
+            }
+        )
+
+        if create_response.status_code not in [200, 201]:
+            error_msg = create_response.json().get("message", "Unknown error")
+            logger.error(f"GitHub API error: {error_msg}")
+            raise HTTPException(status_code=500, detail=f"Failed to create GitHub repo: {error_msg}")
+
+        repo_data = create_response.json()
+        repo_url = repo_data["html_url"]
+        clone_url = repo_data["clone_url"]
+
+        # Clone repo locally
+        repos_dir = Path("./repos")
+        repos_dir.mkdir(exist_ok=True)
+
+        local_path = repos_dir / str(agent_id)
+        local_path.mkdir(exist_ok=True)
+
+        # Clone the repo
+        subprocess.run(
+            ["git", "clone", clone_url.replace("https://", f"https://{github_token}@"), str(local_path)],
+            check=True,
+            capture_output=True
+        )
+
+        # Create initial agent files
+        agent_file = local_path / f"{repo_name}" / "agent_spec.json"
+        agent_file.parent.mkdir(exist_ok=True)
+
+        with open(agent_file, "w") as f:
+            json.dump(agent.agent_spec, f, indent=2)
+
+        readme_file = local_path / f"{repo_name}" / "README.md"
+        with open(readme_file, "w") as f:
+            f.write(f"# {agent.name}\n\n")
+            f.write(f"{agent.description or 'AI Agent'}\n\n")
+            f.write(f"## Agent Specification\n\nSee `agent_spec.json` for the full agent specification.\n")
+
+        # Commit and push
+        subprocess.run(
+            ["git", "-C", str(local_path / repo_name), "add", "."],
+            check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(local_path / repo_name), "commit", "-m", "Initial agent specification"],
+            check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(local_path / repo_name), "push"],
+            check=True
+        )
+
+        # Update agent record
+        agent.repo_url = repo_url
+        agent.repo_local_path = str(local_path / repo_name)
+        agent.updated_at = datetime.utcnow()
+        session.add(agent)
+        session.commit()
+
+        logger.info(f"Created GitHub repo for agent {agent_id}: {repo_url}")
+
+        return {
+            "repo_url": repo_url,
+            "local_path": str(local_path / repo_name),
+            "message": "Repository created and initialized"
+        }
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Git command failed: {e.stderr.decode() if e.stderr else str(e)}")
+        raise HTTPException(status_code=500, detail=f"Git operation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to create repo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create repository: {str(e)}")
+
+
+@app.get("/api/agents/{agent_id}/files")
+async def get_agent_files(
+    agent_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    Get list of files in the agent's GitHub repository.
+    """
+    from pathlib import Path
+
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    if not agent.repo_local_path:
+        return {
+            "files": [],
+            "message": "No repository configured for this agent"
+        }
+
+    try:
+        # List files in the local clone
+        local_path = Path(agent.repo_local_path)
+
+        if not local_path.exists():
+            return {
+                "files": [],
+                "message": "Local repository not found"
+            }
+
+        files = []
+        for file_path in local_path.rglob("*"):
+            if file_path.is_file() and ".git" not in str(file_path):
+                relative_path = file_path.relative_to(local_path)
+
+                # Read file content (limit size)
+                try:
+                    if file_path.stat().st_size < 100000:  # 100KB limit
+                        content = file_path.read_text()
+                    else:
+                        content = "[File too large to display]"
+                except:
+                    content = "[Binary file]"
+
+                files.append({
+                    "path": str(relative_path),
+                    "name": file_path.name,
+                    "size": file_path.stat().st_size,
+                    "content": content
+                })
+
+        return {
+            "files": files,
+            "repo_url": agent.repo_url
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to list files: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@app.post("/api/orchestrations")
+async def create_orchestration(
+    request: CreateOrchestrationRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session)
+):
+    """
+    Create a multi-agent orchestration.
+    Combines multiple agents to work on a task collaboratively.
+    """
+    logger.info(f"Creating orchestration with {len(request.agent_ids)} agents")
+
+    # Validate agents exist
+    agents = []
+    for agent_id in request.agent_ids:
+        agent = session.get(Agent, agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        agents.append(agent)
+
+    # Create orchestration record
+    orchestration = Orchestration(
+        agent_ids=request.agent_ids,
+        prompt=request.prompt,
+        strategy=request.strategy,
+        status=RunStatus.QUEUED,
+        agent_progress={str(aid): 0 for aid in request.agent_ids},
+        agent_outputs={},
+        created_at=datetime.utcnow()
+    )
+
+    session.add(orchestration)
+    session.commit()
+    session.refresh(orchestration)
+
+    # Queue orchestration job
+    from workers.runner import run_orchestration_job
+    background_tasks.add_task(run_orchestration_job, orchestration.id)
+
+    logger.info(f"Created orchestration {orchestration.id}")
+
+    return {
+        "orchestration_id": orchestration.id,
+        "status": orchestration.status,
+        "agent_count": len(request.agent_ids),
+        "message": "Orchestration started"
+    }
+
+
+@app.get("/api/orchestrations/{orchestration_id}")
+async def get_orchestration(
+    orchestration_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    Get orchestration status and results.
+    """
+    orchestration = session.get(Orchestration, orchestration_id)
+
+    if not orchestration:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+
+    return {
+        "id": orchestration.id,
+        "agent_ids": orchestration.agent_ids,
+        "prompt": orchestration.prompt,
+        "strategy": orchestration.strategy,
+        "status": orchestration.status,
+        "agent_progress": orchestration.agent_progress,
+        "agent_outputs": orchestration.agent_outputs,
+        "outputs": orchestration.outputs,
+        "logs": orchestration.logs,
+        "error": orchestration.error,
+        "total_cost": orchestration.total_cost,
+        "total_tokens": orchestration.total_tokens,
+        "generated_agent_id": orchestration.generated_agent_id,
+        "started_at": orchestration.started_at,
+        "completed_at": orchestration.completed_at,
+        "created_at": orchestration.created_at
+    }
 
 
 if __name__ == "__main__":
