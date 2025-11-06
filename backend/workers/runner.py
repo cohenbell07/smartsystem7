@@ -341,7 +341,7 @@ async def run_agent_job(run_id: int):
 
             # Save actual cost information
             token_usage = final_state.get("token_usage", [])
-            total_cost = final_state.get("total_cost", 0.0)
+            total_cost = final_state.get("total_cost")
 
             if token_usage:
                 # Calculate total tokens
@@ -350,8 +350,10 @@ async def run_agent_job(run_id: int):
                     for usage in token_usage
                 )
 
-                run.actual_cost = total_cost
+                total_cost_value = total_cost if total_cost is not None else 0.0
+                run.actual_cost = total_cost_value
                 run.total_tokens = total_tokens
+                run.token_usage = token_usage
 
                 # Store detailed breakdown
                 if run.cost_breakdown:
@@ -363,14 +365,20 @@ async def run_agent_job(run_id: int):
                 else:
                     run.cost_breakdown = {
                         "actual": {
-                            "total_cost": total_cost,
+                            "total_cost": total_cost_value,
                             "total_tokens": total_tokens,
                             "breakdown": token_usage,
                         }
                     }
 
-                run.logs += f"\nActual cost: ${total_cost:.4f} ({total_tokens} tokens)\n"
-                logger.info(f"Run {run_id} actual cost: ${total_cost:.4f}")
+                run.logs += f"\nActual cost: ${total_cost_value:.4f} ({total_tokens} tokens)\n"
+                logger.info(f"Run {run_id} actual cost: ${total_cost_value:.4f}")
+            elif total_cost is not None:
+                # Record total cost even if we lack step-level breakdown.
+                run.actual_cost = total_cost
+
+            if total_cost is not None:
+                run.total_cost = total_cost
 
             # Save artifacts
             for artifact_data in final_state.get("artifacts", []):

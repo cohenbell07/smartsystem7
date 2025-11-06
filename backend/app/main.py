@@ -634,8 +634,10 @@ async def get_run(run_id: int, session: Session = Depends(get_session)):
         "completed_at": run.completed_at,
         "cost_estimate": run.cost_estimate,
         "actual_cost": run.actual_cost,
+        "total_cost": run.total_cost,
         "cost_breakdown": run.cost_breakdown,
         "total_tokens": run.total_tokens,
+        "token_usage": run.token_usage,
         "artifacts": [
             {
                 "id": artifact.id,
