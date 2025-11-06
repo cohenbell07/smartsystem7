@@ -115,6 +115,11 @@ class Run(SQLModel, table=True):
     project_id: Optional[int] = Field(default=None, foreign_key="projects.id", index=True)
 
     status: RunStatus = Field(default=RunStatus.QUEUED)
+
+    # For multi-agent runtime
+    prompt: Optional[str] = None  # User prompt for agent manager
+    recalled_memory: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # Recalled context
+
     inputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     outputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))
 

@@ -25,6 +25,8 @@ export interface Run {
   agent_id?: number
   project_id?: number
   status: string
+  prompt?: string
+  recalled_memory?: any
   inputs?: any
   outputs?: any
   logs?: string
@@ -35,6 +37,12 @@ export interface Run {
   actual_cost?: number
   cost_breakdown?: any
   total_tokens?: number
+  artifacts?: Array<{
+    id: number
+    name: string
+    type: string
+    content: string
+  }>
 }
 
 export interface CostEstimate {
@@ -257,6 +265,23 @@ export async function validateAgentKeys(projectId?: number, agentId?: number) {
 
   if (!res.ok) {
     throw new Error('Failed to validate API keys')
+  }
+
+  return res.json()
+}
+
+/**
+ * Run an agent with a direct prompt using the Agent Manager runtime
+ */
+export async function runAgentWithPrompt(agentId: number, prompt: string) {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  })
+
+  if (!res.ok) {
+    throw new Error('Failed to run agent with prompt')
   }
 
   return res.json()

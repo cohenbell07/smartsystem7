@@ -363,6 +363,145 @@ async def run_agent_job(run_id: int):
             session.commit()
 
 
+async def run_agent_prompt_job(run_id: int):
+    """
+    Execute an agent with a direct prompt using the Agent Manager runtime.
+    This enables multi-agent orchestration with sub-agents and memory recall.
+    """
+    logger.info(f"Starting agent prompt execution for run {run_id}")
+
+    with Session(engine) as session:
+        run = session.get(Run, run_id)
+        if not run:
+            logger.error(f"Run {run_id} not found")
+            return
+
+        try:
+            # Update status
+            run.status = RunStatus.RUNNING
+            run.started_at = datetime.utcnow()
+            run.logs = "Starting multi-agent runtime execution...\n"
+            session.add(run)
+            session.commit()
+
+            # Get agent
+            from app.models import Agent
+            agent = session.get(Agent, run.agent_id)
+            if not agent:
+                raise ValueError(f"Agent {run.agent_id} not found")
+
+            run.logs += f"Agent: {agent.name}\n"
+            run.logs += f"Prompt: {run.prompt}\n\n"
+            session.add(run)
+            session.commit()
+
+            # Initialize components
+            from app.agents.manager import AgentManager
+            from app.agents.tools import BrowserTool, GitHubTool, EmailTool, VectorMemoryTool, APICaller, CodeExecutor
+            from app.services import LLMRouter
+
+            llm_router = LLMRouter()
+            vector_memory = VectorMemoryTool()
+
+            # Initialize tools
+            tools = {
+                "browser": BrowserTool(),
+                "github": GitHubTool(),
+                "email": EmailTool(),
+                "vector_memory": vector_memory,
+                "api_caller": APICaller(),
+                "code_executor": CodeExecutor(),
+            }
+
+            run.logs += "Initializing Agent Manager...\n"
+            session.add(run)
+            session.commit()
+
+            # Create Agent Manager
+            agent_manager = AgentManager(
+                llm_router=llm_router,
+                tools=tools,
+                vector_memory=vector_memory
+            )
+
+            # Prepare agent context
+            agent_context = {
+                "name": agent.name,
+                "description": agent.description or "No description",
+                "tools": list(tools.keys()),
+                "agent_spec": agent.agent_spec
+            }
+
+            run.logs += "Starting workflow execution...\n"
+            session.add(run)
+            session.commit()
+
+            # Execute workflow
+            workflow_results = await agent_manager.execute_workflow(
+                user_prompt=run.prompt,
+                agent_id=agent.id,
+                agent_context=agent_context
+            )
+
+            # Update run with results
+            run.outputs = {
+                "workflow_status": workflow_results.get("status"),
+                "intent": workflow_results.get("intent", {}),
+                "steps": workflow_results.get("steps", []),
+                "sub_agent_results": workflow_results.get("sub_agent_results", []),
+                "final_output": workflow_results.get("output", ""),
+                "errors": workflow_results.get("errors", [])
+            }
+
+            # Store recalled memory
+            run.recalled_memory = {
+                "count": len(workflow_results.get("recalled_memory", [])),
+                "items": workflow_results.get("recalled_memory", [])
+            }
+
+            # Append workflow logs
+            for log_entry in workflow_results.get("logs", []):
+                run.logs += f"{log_entry}\n"
+
+            # Determine final status
+            if workflow_results.get("status") == "completed":
+                run.status = RunStatus.COMPLETED
+                run.logs += "\n✓ Workflow completed successfully\n"
+            elif workflow_results.get("status") == "completed_with_errors":
+                run.status = RunStatus.COMPLETED
+                run.logs += "\n⚠ Workflow completed with errors\n"
+            else:
+                run.status = RunStatus.FAILED
+                run.logs += "\n✗ Workflow failed\n"
+
+            # Save artifacts from sub-agents
+            for i, sub_result in enumerate(workflow_results.get("sub_agent_results", [])):
+                if sub_result.get("success"):
+                    artifact = Artifact(
+                        run_id=run.id,
+                        project_id=run.project_id,
+                        name=f"{sub_result.get('sub_agent', 'subagent')}_output",
+                        artifact_type="text",
+                        content=sub_result.get("output", ""),
+                    )
+                    session.add(artifact)
+
+            run.completed_at = datetime.utcnow()
+            session.add(run)
+            session.commit()
+
+            logger.info(f"Agent prompt execution completed for run {run_id}")
+
+        except Exception as e:
+            logger.error(f"Agent prompt execution failed for run {run_id}: {e}", exc_info=True)
+            run.status = RunStatus.FAILED
+            run.error = str(e)
+            run.logs += f"\nError: {str(e)}\n"
+            run.completed_at = datetime.utcnow()
+            session.add(run)
+            session.commit()
+
+
 # Simple worker loop (in production, use RQ or Celery)
 if __name__ == "__main__":
     logger.info("Worker runner started (for development only)")

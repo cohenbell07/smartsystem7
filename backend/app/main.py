@@ -154,6 +154,10 @@ class UpdateSecretsRequest(BaseModel):
     secrets: dict[str, str]
 
 
+class AgentPromptRequest(BaseModel):
+    prompt: str
+
+
 # Routes
 
 @app.get("/")
@@ -469,9 +473,58 @@ async def get_agent(agent_id: int, session: Session = Depends(get_session)):
                 "status": run.status,
                 "started_at": run.started_at,
                 "completed_at": run.completed_at,
+                "prompt": run.prompt,
             }
             for run in runs
         ],
+    }
+
+
+@app.post("/api/agents/{agent_id}/prompt")
+async def run_agent_with_prompt(
+    agent_id: int,
+    request: AgentPromptRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """
+    Execute an agent with a direct prompt using the Agent Manager runtime.
+    This enables multi-agent orchestration with sub-agents and memory recall.
+    """
+    logger.info(f"Running agent {agent_id} with prompt: {request.prompt[:100]}...")
+
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Create run record
+    run = Run(
+        agent_id=agent_id,
+        status=RunStatus.QUEUED,
+        prompt=request.prompt,
+        created_at=datetime.utcnow(),
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    # Start background job
+    try:
+        from workers.runner import run_agent_prompt_job
+        background_tasks.add_task(run_agent_prompt_job, run.id)
+        logger.info(f"Queued agent prompt job for run {run.id}")
+    except ImportError:
+        logger.warning("Background worker not available, running synchronously")
+        # Fallback to synchronous execution if worker not available
+        from workers.runner import run_agent_prompt_job
+        await run_agent_prompt_job(run.id)
+
+    return {
+        "run_id": run.id,
+        "agent_id": agent.id,
+        "status": run.status,
+        "message": "Agent execution started with prompt"
     }
 
 
@@ -492,6 +545,8 @@ async def get_run(run_id: int, session: Session = Depends(get_session)):
         "agent_id": run.agent_id,
         "project_id": run.project_id,
         "status": run.status,
+        "prompt": run.prompt,
+        "recalled_memory": run.recalled_memory,
         "inputs": run.inputs,
         "outputs": run.outputs,
         "logs": run.logs,
