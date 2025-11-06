@@ -184,3 +184,114 @@ class VectorMemoryTool:
             n_results=n_results,
             where=where
         )
+
+    def recall(self, context_query: str, n_results: int = 5, agent_id: Optional[int] = None, filters: Optional[Dict] = None) -> List[Dict[str, Any]]:
+        """
+        Recall relevant past memories based on semantic similarity.
+
+        This method is designed for automatic memory injection into agent prompts.
+
+        Args:
+            context_query: The query to find relevant memories (e.g., agent's current task)
+            n_results: Maximum number of results to return (default: 5)
+            agent_id: Optional agent ID to filter memories for specific agent
+            filters: Optional additional metadata filters
+
+        Returns:
+            List of recalled memories with text, metadata, and relevance scores
+        """
+        try:
+            # Build metadata filter
+            where_filter = filters or {}
+            if agent_id is not None:
+                where_filter["agent_id"] = agent_id
+
+            # Query the collection
+            results = self.collection.query(
+                query_texts=[context_query],
+                n_results=n_results,
+                where=where_filter if where_filter else None
+            )
+
+            # Format results for easy consumption
+            documents = results.get("documents", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            ids = results.get("ids", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0]
+
+            recalled_memories = []
+            for i in range(len(documents)):
+                recalled_memories.append({
+                    "id": ids[i],
+                    "text": documents[i],
+                    "relevance_score": 1.0 - distances[i],  # Convert distance to similarity
+                    "metadata": metadatas[i],
+                })
+
+            logger.info(f"Recalled {len(recalled_memories)} memories for query: '{context_query[:50]}...'")
+            return recalled_memories
+
+        except Exception as e:
+            logger.error(f"Error recalling memories: {e}")
+            return []
+
+    def remember(self, documents: List[str], metadatas: Optional[List[Dict]] = None, agent_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Store new information in memory after agent runs.
+
+        This method is designed for automatic memory storage after task completion.
+
+        Args:
+            documents: List of text documents to remember
+            metadatas: Optional list of metadata dicts (one per document)
+            agent_id: Optional agent ID to associate with these memories
+
+        Returns:
+            Dict with success status and stored document IDs
+        """
+        try:
+            if not documents:
+                return {"error": "No documents provided", "success": False}
+
+            # Generate IDs for documents
+            import hashlib
+            import time
+            ids = []
+            for i, doc in enumerate(documents):
+                # Create unique ID combining timestamp, content hash, and index
+                unique_str = f"{time.time()}_{doc}_{i}"
+                doc_id = hashlib.md5(unique_str.encode()).hexdigest()
+                ids.append(doc_id)
+
+            # Prepare metadatas
+            if metadatas is None:
+                metadatas = [{} for _ in documents]
+
+            # Add agent_id to all metadatas if provided
+            if agent_id is not None:
+                for metadata in metadatas:
+                    metadata["agent_id"] = agent_id
+
+            # Add timestamps
+            import datetime
+            timestamp = datetime.datetime.utcnow().isoformat()
+            for metadata in metadatas:
+                metadata["stored_at"] = timestamp
+
+            # Store in collection
+            self.collection.add(
+                documents=documents,
+                ids=ids,
+                metadatas=metadatas,
+            )
+
+            logger.info(f"Remembered {len(documents)} new memories (agent_id: {agent_id})")
+            return {
+                "success": True,
+                "stored_ids": ids,
+                "count": len(documents),
+            }
+
+        except Exception as e:
+            logger.error(f"Error remembering documents: {e}")
+            return {"error": str(e), "success": False}
