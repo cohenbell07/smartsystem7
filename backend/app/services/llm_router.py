@@ -178,3 +178,178 @@ Respond with: A or B, followed by a brief rationale.
             "selected_model": None,
             "rationale": "No LLM plans generated",
         }
+
+    async def plan_with_claude_emit_with_gpt(
+        self, task: str, context: str = "", strategy: str = "hybrid"
+    ) -> dict:
+        """
+        Hybrid agent generation: Claude for planning, GPT for code emission.
+
+        This implements a cooperative workflow:
+        1. Claude (Sonnet/Haiku) for decomposition and planning
+        2. GPT (gpt-4o-mini) for structured code emission with JSON schemas
+        3. Claude for review and refactoring
+
+        Args:
+            task: The task to plan and generate code for
+            context: Additional context
+            strategy: "hybrid" (default), "claude-only", or "gpt-only"
+
+        Returns:
+            Dict with plan, code, and metadata
+        """
+        logger.info(f"Starting hybrid generation with strategy: {strategy}")
+
+        result = {
+            "plan": None,
+            "code": None,
+            "review": None,
+            "strategy": strategy,
+            "models_used": [],
+        }
+
+        # Strategy 1: Claude-only
+        if strategy == "claude-only":
+            if not self.claude:
+                raise ValueError("Claude not configured for claude-only strategy")
+
+            logger.info("Using Claude-only strategy")
+            planning_prompt = f"""
+Task: {task}
+
+Context: {context}
+
+Please:
+1. Decompose this task into steps
+2. Generate a detailed agent specification with nodes and edges
+3. Provide any necessary code stubs and tool contracts
+
+Return a comprehensive solution with both plan and implementation.
+"""
+            response = await self.claude.ainvoke([{"role": "user", "content": planning_prompt}])
+            result["plan"] = response.content
+            result["code"] = response.content
+            result["models_used"] = ["claude"]
+            return result
+
+        # Strategy 2: GPT-only
+        if strategy == "gpt-only":
+            if not self.gpt:
+                raise ValueError("GPT not configured for gpt-only strategy")
+
+            logger.info("Using GPT-only strategy")
+            planning_prompt = f"""
+Task: {task}
+
+Context: {context}
+
+Please:
+1. Decompose this task into steps
+2. Generate a detailed agent specification with nodes and edges
+3. Provide JSON schemas and typed function signatures
+4. Generate any necessary code stubs
+
+Return a comprehensive solution with both plan and implementation in JSON format.
+"""
+            response = await self.gpt.ainvoke([{"role": "user", "content": planning_prompt}])
+            result["plan"] = response.content
+            result["code"] = response.content
+            result["models_used"] = ["gpt"]
+            return result
+
+        # Strategy 3: Hybrid (default)
+        logger.info("Using hybrid strategy (Claude planning -> GPT emission -> Claude review)")
+
+        # Step 1: Claude plans and decomposes
+        if self.claude:
+            logger.info("Step 1: Claude planning and decomposition")
+            planning_prompt = f"""
+Task: {task}
+
+Context: {context}
+
+Please decompose this task and create a detailed execution plan:
+1. Break down the task into logical steps
+2. Identify required tools and APIs
+3. Define node types and their responsibilities
+4. Outline the workflow edges and dependencies
+5. Provide clear requirements for code generation
+
+Focus on the "why" and high-level architecture. Be thorough and clear.
+"""
+            try:
+                claude_response = await self.claude.ainvoke([{"role": "user", "content": planning_prompt}])
+                result["plan"] = claude_response.content
+                result["models_used"].append("claude-planning")
+                logger.info("Claude planning complete")
+            except Exception as e:
+                logger.error(f"Claude planning failed: {e}")
+                result["plan"] = None
+        else:
+            logger.warning("Claude not available, skipping planning step")
+
+        # Step 2: GPT emits structured code
+        if self.gpt:
+            logger.info("Step 2: GPT structured code emission")
+            emission_prompt = f"""
+Task: {task}
+
+Context: {context}
+
+Plan from Claude:
+{result.get("plan", "No plan available")}
+
+Please generate structured, deterministic code:
+1. Create JSON schemas for all data structures
+2. Generate typed function signatures
+3. Create tool contracts with Pydantic models
+4. Provide complete node implementations
+5. Generate edge definitions with clear conditions
+
+Focus on the "what" and implementation details. Use strict types and JSON schemas.
+Return valid JSON where possible.
+"""
+            try:
+                gpt_response = await self.gpt.ainvoke([{"role": "user", "content": emission_prompt}])
+                result["code"] = gpt_response.content
+                result["models_used"].append("gpt-emission")
+                logger.info("GPT code emission complete")
+            except Exception as e:
+                logger.error(f"GPT emission failed: {e}")
+                result["code"] = result.get("plan", None)
+        else:
+            logger.warning("GPT not available, using Claude plan as code")
+            result["code"] = result.get("plan", None)
+
+        # Step 3: Claude reviews and refactors
+        if self.claude and result.get("code"):
+            logger.info("Step 3: Claude review and refactoring")
+            review_prompt = f"""
+Plan:
+{result.get("plan", "")}
+
+Generated Code:
+{result["code"]}
+
+Please review this generated code:
+1. Check for clarity and maintainability
+2. Add clear docstrings
+3. Suggest refactorings for better structure
+4. Identify potential issues
+5. Do NOT change function signatures or break contracts
+
+Focus on code quality and documentation. Return the reviewed code with improvements.
+"""
+            try:
+                review_response = await self.claude.ainvoke([{"role": "user", "content": review_prompt}])
+                result["review"] = review_response.content
+                result["models_used"].append("claude-review")
+                logger.info("Claude review complete")
+            except Exception as e:
+                logger.error(f"Claude review failed: {e}")
+                result["review"] = None
+        else:
+            logger.warning("Claude not available or no code, skipping review")
+
+        logger.info(f"Hybrid generation complete. Models used: {result['models_used']}")
+        return result

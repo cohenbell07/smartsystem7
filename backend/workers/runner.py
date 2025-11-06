@@ -175,14 +175,20 @@ async def run_research_job(project_id: int):
 
 
 async def generate_agent_spec(question: str, research_brief: str, viability: dict, llm_router: LLMRouter) -> dict:
-    """Generate an agent specification from research and viability analysis."""
+    """
+    Generate an agent specification from research and viability analysis.
+
+    Uses hybrid Claude+GPT generation if BUILD_STRATEGY=hybrid (default).
+    """
     from app.research.synthesize import load_prompt
+
+    # Get build strategy from environment
+    build_strategy = os.getenv("BUILD_STRATEGY", "hybrid")
+    logger.info(f"Generating agent spec with BUILD_STRATEGY={build_strategy}")
 
     prompt = load_prompt("agent_spec") or "Generate an agent specification as JSON."
 
-    llm = await llm_router.get_llm()
-
-    user_prompt = f"""
+    task = f"""
 Based on this research, design an AI agent:
 
 Question: {question}
@@ -192,17 +198,46 @@ Research Summary:
 
 Viability Score: {viability['overall']}/100
 
-Generate a complete AgentSpec in JSON format.
+Generate a complete AgentSpec in JSON format with:
+- name: string
+- description: string
+- objective: string
+- tools: list of tool names (e.g., ["browser", "github", "vector_memory"])
+- apis: list of external APIs (e.g., ["OPENAI_API_KEY", "GITHUB_TOKEN"])
+- graph_type: string
+- nodes: list of node dicts with {{name, type, description, tool (optional), model (optional)}}
+- edges: list of edge dicts with {{from, to, condition (optional)}}
+- test_plan: list of test steps
+- success_criteria: list of success criteria
+- approval_gates: list of steps requiring approval
+- estimated_runtime: int (seconds)
 """
 
-    response = await llm.ainvoke([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": user_prompt}
-    ])
+    # Use hybrid generation if enabled
+    if build_strategy == "hybrid":
+        logger.info("Using hybrid Claude+GPT generation")
+        hybrid_result = await llm_router.plan_with_claude_emit_with_gpt(
+            task=task,
+            context=f"System prompt: {prompt}",
+            strategy="hybrid"
+        )
+
+        # Use the reviewed code if available, otherwise code, otherwise plan
+        content = hybrid_result.get("review") or hybrid_result.get("code") or hybrid_result.get("plan")
+        logger.info(f"Hybrid generation used models: {hybrid_result.get('models_used', [])}")
+    else:
+        # Fallback to single-model generation
+        logger.info(f"Using single-model generation: {build_strategy}")
+        llm = await llm_router.get_llm()
+
+        response = await llm.ainvoke([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": task}
+        ])
+
+        content = response.content
 
     # Try to parse JSON from response
-    content = response.content
-
     # Extract JSON if wrapped in markdown
     if "```json" in content:
         content = content.split("```json")[1].split("```")[0].strip()
@@ -211,9 +246,11 @@ Generate a complete AgentSpec in JSON format.
 
     try:
         agent_spec = json.loads(content)
+        logger.info(f"Successfully parsed agent spec with {len(agent_spec.get('nodes', []))} nodes")
         return agent_spec
     except json.JSONDecodeError:
         logger.error("Failed to parse agent spec JSON")
+        logger.error(f"Content: {content[:500]}")
         # Return minimal spec
         return {
             "name": "GeneratedAgent",

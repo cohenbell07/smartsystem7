@@ -285,6 +285,114 @@ make clean
    - Click "Save Agent"
    - Find it in "My Agents" page
 
+5. **Prompt a Saved Agent**
+   - Go to "My Agents" page
+   - Click on any saved agent
+   - Navigate to "Run" tab
+   - Enter a prompt (e.g., "Analyze the market for design tools in 2024")
+   - Click "Run with Prompt"
+   - View logs and results in real-time
+
+---
+
+## How Agent Builder Uses Claude + GPT Together
+
+The Agent Factory uses a **hybrid generation strategy** that leverages the strengths of both Claude and GPT:
+
+### Generation Flow
+
+1. **Claude (Planning & Decomposition)**
+   - Uses Claude Sonnet or Haiku for high-level planning
+   - Breaks down tasks into logical steps
+   - Identifies required tools and APIs
+   - Provides the "why" and architecture rationale
+
+2. **GPT (Structured Code Emission)**
+   - Uses GPT-4o-mini or GPT-4.1-mini for code generation
+   - Creates JSON schemas and typed function signatures
+   - Generates deterministic tool contracts with Pydantic models
+   - Provides the "what" and implementation details
+
+3. **Claude (Review & Refactor)**
+   - Reviews generated code for clarity
+   - Adds comprehensive docstrings
+   - Suggests refactorings for better structure
+   - Does NOT change function signatures (maintains contracts)
+
+### Configuration
+
+Control the build strategy with the `BUILD_STRATEGY` environment variable in `.env`:
+
+```bash
+# Default: Use Claude for planning, GPT for code, Claude for review
+BUILD_STRATEGY=hybrid
+
+# Use only Claude (requires ANTHROPIC_API_KEY)
+BUILD_STRATEGY=claude-only
+
+# Use only GPT (requires OPENAI_API_KEY)
+BUILD_STRATEGY=gpt-only
+```
+
+### Benefits
+
+- **Better Planning**: Claude excels at decomposition and architectural thinking
+- **Cleaner Code**: GPT provides structured, deterministic code generation
+- **Quality Assurance**: Claude's review adds documentation and catches issues
+- **Flexibility**: Fallback strategies if one provider is unavailable
+
+---
+
+## Prompting Saved Agents
+
+Once an agent is saved, you can interact with it in multiple ways:
+
+### Method 1: Direct Prompt (Agent Manager Runtime)
+
+The agent uses the **Agent Manager runtime** which provides:
+- **Multi-agent orchestration** with sub-agents (Planner, Researcher, Implementer, etc.)
+- **Semantic memory recall** from previous runs
+- **Dynamic task execution** based on the prompt
+
+**Example:**
+```json
+POST /api/agents/{agent_id}/run
+{
+  "prompt": "Analyze the latest trends in AI agents"
+}
+```
+
+**Frontend:** Go to agent detail page → "Run" tab → Enter prompt → Click "Run with Prompt"
+
+### Method 2: Direct Inputs (Graph Execution)
+
+For traditional graph-based execution with structured inputs:
+
+**Example:**
+```json
+POST /api/agents/{agent_id}/run
+{
+  "inputs": {
+    "query": "market research data",
+    "filters": ["2024", "SaaS"]
+  }
+}
+```
+
+### API Endpoints
+
+- `POST /api/agents/{agent_id}/run` - Run saved agent (prompt or inputs)
+- `POST /api/agents/{agent_id}/prompt` - Run with prompt (legacy, use above)
+- `GET /api/runs/{run_id}` - Get run status, logs, and results
+
+### Key Validation
+
+Before running an agent, the system automatically validates that all required API keys are present:
+
+- **LLM Keys**: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+- **Tool Keys**: `GITHUB_TOKEN`, `SERPAPI_KEY`, `SNYK_TOKEN`, etc.
+- **Missing Keys**: UI shows which keys are missing with setup instructions
+
 ---
 
 ## Production Deployment

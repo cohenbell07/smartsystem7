@@ -159,6 +159,210 @@ def create_human_node(node_spec: dict, approval_callback):
     return human_node
 
 
+def create_final_output_node():
+    """Create a terminal FinalOutput node that aggregates results."""
+
+    async def final_output_node(state: AgentState) -> AgentState:
+        logger.info("Executing FinalOutput terminal node")
+
+        # Aggregate outputs and artifacts into final result
+        result = {
+            "result": state.get("outputs", {}),
+            "artifacts": state.get("artifacts", []),
+            "step_count": state.get("step_count", 0),
+            "errors": state.get("errors", []),
+        }
+
+        return {
+            "outputs": {"final_output": result},
+            "step_count": state.get("step_count", 0) + 1,
+        }
+
+    return final_output_node
+
+
+def ensure_terminal(workflow: StateGraph, spec: dict) -> None:
+    """
+    Ensure the workflow has a proper terminal node.
+
+    Adds a FinalOutput node if no terminal node exists and wires
+    unreachable terminal candidates to it.
+
+    Args:
+        workflow: The StateGraph being built
+        spec: The agent spec dict
+    """
+    logger.info("Ensuring terminal node for workflow")
+
+    # Collect all nodes and edges
+    nodes = {node["name"] for node in spec.get("nodes", [])}
+    edges = spec.get("edges", [])
+
+    # Find nodes with outgoing edges
+    nodes_with_outgoing = {edge["from"] for edge in edges}
+
+    # Find terminal candidates (nodes with no outgoing edges or edges to END)
+    terminal_candidates = []
+    for node_name in nodes:
+        if node_name not in nodes_with_outgoing:
+            terminal_candidates.append(node_name)
+        else:
+            # Check if this node only has edges to END
+            outgoing_edges = [e for e in edges if e["from"] == node_name]
+            if all(e["to"] == "END" for e in outgoing_edges):
+                terminal_candidates.append(node_name)
+
+    # If no terminal candidates, use the last node in the spec
+    if not terminal_candidates and nodes:
+        last_node = list(nodes)[-1]
+        terminal_candidates.append(last_node)
+        logger.warning(f"No terminal node found, using last node: {last_node}")
+
+    # Add FinalOutput node
+    final_output_node = create_final_output_node()
+    workflow.add_node("FinalOutput", final_output_node)
+
+    # Wire terminal candidates to FinalOutput
+    for candidate in terminal_candidates:
+        if candidate in nodes:
+            logger.info(f"Wiring terminal candidate '{candidate}' to FinalOutput")
+            # Remove existing END edges from this node
+            spec["edges"] = [e for e in spec["edges"] if not (e["from"] == candidate and e["to"] == "END")]
+            # Add edge to FinalOutput
+            workflow.add_edge(candidate, "FinalOutput")
+
+    # Wire FinalOutput to END
+    workflow.add_edge("FinalOutput", END)
+    logger.info("Terminal node wiring complete")
+
+
+def linearize_when_disconnected(workflow: StateGraph, spec: dict) -> None:
+    """
+    Linearize disconnected nodes by connecting them in declaration order.
+
+    This is a fallback mechanism when the spec has unreferenced nodes
+    or disconnected components.
+
+    Args:
+        workflow: The StateGraph being built
+        spec: The agent spec dict
+    """
+    logger.info("Checking for disconnected nodes")
+
+    nodes = [node["name"] for node in spec.get("nodes", [])]
+    edges = spec.get("edges", [])
+
+    # Build adjacency list
+    incoming = {node: [] for node in nodes}
+    outgoing = {node: [] for node in nodes}
+
+    for edge in edges:
+        from_node = edge["from"]
+        to_node = edge["to"]
+        if to_node != "END" and to_node in nodes:
+            outgoing[from_node].append(to_node)
+            incoming[to_node].append(from_node)
+
+    # Find disconnected nodes (no incoming or outgoing edges)
+    disconnected = [
+        node for node in nodes
+        if len(incoming[node]) == 0 and len(outgoing[node]) == 0
+    ]
+
+    if disconnected:
+        logger.warning(f"Found {len(disconnected)} disconnected nodes: {disconnected}")
+        logger.info("Linearizing disconnected nodes by declaration order")
+
+        # Connect disconnected nodes in sequence
+        for i, node in enumerate(disconnected):
+            if i == 0:
+                # Find entry point or first connected node
+                connected_nodes = [n for n in nodes if n not in disconnected]
+                if connected_nodes:
+                    # Connect first disconnected to last connected node with no outgoing
+                    candidates = [n for n in connected_nodes if len(outgoing[n]) == 0]
+                    if candidates:
+                        prev_node = candidates[0]
+                        logger.info(f"Connecting {prev_node} -> {node}")
+                        workflow.add_edge(prev_node, node)
+                        spec["edges"].append({"from": prev_node, "to": node})
+            else:
+                # Connect to previous disconnected node
+                prev_node = disconnected[i - 1]
+                logger.info(f"Connecting {prev_node} -> {node}")
+                workflow.add_edge(prev_node, node)
+                spec["edges"].append({"from": prev_node, "to": node})
+    else:
+        logger.info("No disconnected nodes found")
+
+
+def generate_tool_stub(tool_name: str) -> Any:
+    """
+    Generate a minimal, typed tool stub for missing tools.
+
+    Args:
+        tool_name: Name of the missing tool
+
+    Returns:
+        Tool stub instance
+    """
+    logger.info(f"Generating stub for missing tool: {tool_name}")
+
+    class ToolStub:
+        """Minimal tool stub with error handling."""
+
+        def __init__(self, name: str):
+            self.name = name
+
+        async def execute(self, inputs: dict) -> dict:
+            """Execute stub (returns error message)."""
+            logger.warning(f"Executing stub for tool '{self.name}' - tool not implemented")
+            return {
+                "success": False,
+                "error": f"Tool '{self.name}' is not implemented (using stub)",
+                "message": f"The agent requested tool '{self.name}' but it is not available. "
+                           f"Please implement this tool or remove it from the agent spec.",
+                "inputs": inputs,
+            }
+
+    return ToolStub(tool_name)
+
+
+def verify_and_generate_tools(spec: dict, tools: dict) -> dict:
+    """
+    Verify tools exist and generate stubs for missing ones.
+
+    Args:
+        spec: Agent spec
+        tools: Available tools dict
+
+    Returns:
+        Updated tools dict with stubs for missing tools
+    """
+    logger.info("Verifying tools and generating stubs if needed")
+
+    updated_tools = tools.copy()
+    required_tools = set()
+
+    # Collect all tools referenced in nodes
+    for node_spec in spec.get("nodes", []):
+        if node_spec.get("type") == "tool":
+            tool_name = node_spec.get("tool")
+            if tool_name:
+                required_tools.add(tool_name)
+
+    # Check for missing tools and generate stubs
+    missing_tools = required_tools - set(tools.keys())
+
+    if missing_tools:
+        logger.warning(f"Missing tools detected: {missing_tools}")
+        for tool_name in missing_tools:
+            logger.info(f"Generating stub for tool: {tool_name}")
+            updated_tools[tool_name] = generate_tool_stub(tool_name)
+
+    return updated_tools
+
+
 def create_agent_from_spec(
     spec: dict, llm_router, tools: dict, approval_callback=None
 ) -> StateGraph:
@@ -175,6 +379,9 @@ def create_agent_from_spec(
         Compiled StateGraph
     """
     logger.info(f"Building agent: {spec.get('name', 'unnamed')}")
+
+    # Verify tools and generate stubs for missing ones
+    tools = verify_and_generate_tools(spec, tools)
 
     # Initialize graph
     workflow = StateGraph(AgentState)
@@ -211,7 +418,8 @@ def create_agent_from_spec(
             entry_point = from_node
 
         if to_node == "END":
-            workflow.add_edge(from_node, END)
+            # Don't add END edges yet - will be handled by ensure_terminal
+            continue
         elif condition:
             # TODO: Support conditional edges
             logger.warning(f"Conditional edges not yet supported: {from_node} -> {to_node}")
@@ -219,13 +427,31 @@ def create_agent_from_spec(
         else:
             workflow.add_edge(from_node, to_node)
 
+    # Linearize disconnected nodes if needed
+    linearize_when_disconnected(workflow, spec)
+
+    # Ensure terminal node exists and is properly wired
+    ensure_terminal(workflow, spec)
+
     # Set entry point
     if entry_point:
         workflow.set_entry_point(entry_point)
     else:
-        logger.warning("No entry point found for agent graph")
+        # If no entry point found, use first node
+        nodes = spec.get("nodes", [])
+        if nodes:
+            entry_point = nodes[0]["name"]
+            workflow.set_entry_point(entry_point)
+            logger.warning(f"No entry point found, using first node: {entry_point}")
+        else:
+            raise ValueError("No nodes found in agent spec")
 
     # Compile and return
-    compiled = workflow.compile()
-    logger.info(f"Agent compiled successfully: {spec.get('name', 'unnamed')}")
-    return compiled
+    try:
+        compiled = workflow.compile()
+        logger.info(f"Agent compiled successfully: {spec.get('name', 'unnamed')}")
+        return compiled
+    except Exception as e:
+        logger.error(f"Failed to compile agent: {e}")
+        logger.error(f"Spec: {spec}")
+        raise ValueError(f"Agent compilation failed: {e}. This may indicate disconnected nodes or invalid graph structure.")
