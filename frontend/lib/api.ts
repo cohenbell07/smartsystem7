@@ -274,14 +274,119 @@ export async function validateAgentKeys(projectId?: number, agentId?: number) {
  * Run an agent with a direct prompt using the Agent Manager runtime
  */
 export async function runAgentWithPrompt(agentId: number, prompt: string) {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}/prompt`, {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt }),
   })
 
+  // Handle 428 status for missing API keys
+  if (res.status === 428) {
+    const data = await res.json()
+    throw { status: 428, ...data }
+  }
+
   if (!res.ok) {
     throw new Error('Failed to run agent with prompt')
+  }
+
+  return res.json()
+}
+
+/**
+ * Get required API keys for an agent
+ */
+export async function getRequiredKeys(agentId: number) {
+  const res = await fetch(`${API_BASE}/api/settings/required_keys?agent_id=${agentId}`)
+
+  if (!res.ok) {
+    throw new Error('Failed to get required keys')
+  }
+
+  return res.json()
+}
+
+/**
+ * Set API keys
+ */
+export async function setKeys(keys: Record<string, string>) {
+  const res = await fetch(`${API_BASE}/api/settings/keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys }),
+  })
+
+  if (!res.ok) {
+    throw new Error('Failed to set keys')
+  }
+
+  return res.json()
+}
+
+/**
+ * Create GitHub repository for an agent
+ */
+export async function createAgentRepo(agentId: number) {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/repo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  })
+
+  // Handle 428 status for missing GitHub token
+  if (res.status === 428) {
+    const data = await res.json()
+    throw { status: 428, ...data }
+  }
+
+  if (!res.ok) {
+    throw new Error('Failed to create repository')
+  }
+
+  return res.json()
+}
+
+/**
+ * Get agent repository files
+ */
+export async function getAgentFiles(agentId: number) {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/files`)
+
+  if (!res.ok) {
+    throw new Error('Failed to get agent files')
+  }
+
+  return res.json()
+}
+
+/**
+ * Create a multi-agent orchestration
+ */
+export async function createOrchestration(
+  agentIds: number[],
+  prompt: string,
+  strategy: string = 'manager-led'
+) {
+  const res = await fetch(`${API_BASE}/api/orchestrations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_ids: agentIds, prompt, strategy }),
+  })
+
+  if (!res.ok) {
+    throw new Error('Failed to create orchestration')
+  }
+
+  return res.json()
+}
+
+/**
+ * Get orchestration status
+ */
+export async function getOrchestration(orchestrationId: number) {
+  const res = await fetch(`${API_BASE}/api/orchestrations/${orchestrationId}`)
+
+  if (!res.ok) {
+    throw new Error('Failed to get orchestration')
   }
 
   return res.json()

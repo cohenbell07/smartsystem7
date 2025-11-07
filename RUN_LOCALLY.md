@@ -36,7 +36,23 @@ ANTHROPIC_API_KEY=sk-ant-...
 SERPAPI_KEY=...
 # Legacy option (for direct Bing API v7 access)
 BING_SEARCH_API_KEY=...
+
+# Optional: GitHub integration for agent repositories
+GITHUB_TOKEN=ghp_...
+
+# Optional: Hybrid agent generation strategy (default: hybrid)
+BUILD_STRATEGY=hybrid  # Options: hybrid, claude-only, gpt-only
+
+# Optional: Email notifications
+SMTP_USER=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_HOST=smtp.gmail.com
+
+# Optional: Discord notifications
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ```
+
+**Note**: You can also configure API keys through the UI when running agents. The system will prompt you if keys are missing.
 
 ### 3. Install Dependencies
 
@@ -260,6 +276,83 @@ make test-backend
 # Clean generated files
 make clean
 ```
+
+---
+
+## New Features: Zero-Fail Orchestration & GitHub Integration
+
+### Zero-Fail API Key Collection
+
+The system now handles missing API keys gracefully:
+
+1. **Run an agent** - If required keys are missing, you'll see a modal instead of an error
+2. **Add keys on-the-fly** - Enter your API keys directly in the UI
+3. **Auto-retry** - Keys are saved to `.env` and the run automatically retries
+
+**Supported keys:**
+- `OPENAI_API_KEY` - OpenAI models (GPT-4, GPT-4o-mini)
+- `ANTHROPIC_API_KEY` - Anthropic models (Claude 3.5 Sonnet/Haiku)
+- `GITHUB_TOKEN` - GitHub repository creation
+- `SERPAPI_KEY` / `BING_SEARCH_API_KEY` - Web search (at least one required)
+- `SMTP_USER`, `SMTP_PASSWORD` - Email notifications
+
+### GitHub Integration for Agents
+
+Each agent can have its own GitHub repository:
+
+1. **Navigate to an agent** in the "My Agents" section
+2. **Click "Files" tab** → "Create GitHub Repository"
+3. **View generated code** - See the agent specification and generated files
+4. **Open on GitHub** - Link directly to the repository
+5. **Local sync** - Files are stored locally in `./repos/<agent_id>/`
+
+**Requirements:**
+- Set `GITHUB_TOKEN` in `.env` or add it via the UI
+- Token needs `repo` scope for creating repositories
+
+### Multi-Agent Orchestration
+
+Coordinate multiple agents to work on complex tasks:
+
+1. **Visit /orchestrations** page
+2. **Select agents** - Choose 2+ agents from your portfolio
+3. **Choose strategy:**
+   - **Manager-Led**: AI manager coordinates and delegates (default)
+   - **Sequential**: Agents run one after another, passing results
+   - **Parallel**: All agents execute simultaneously
+4. **Enter prompt** - Describe the collaborative task
+5. **Monitor progress** - Watch per-agent progress bars and logs
+
+**Example use cases:**
+- Research + Coding: One agent researches, another implements
+- Analysis + Reporting: Analyze data, then generate report
+- Planning + Execution: Plan project, then execute steps
+
+### Cost & Token Tracking
+
+All runs now track:
+- **Total Cost**: USD spent on API calls
+- **Total Tokens**: Input + output tokens used
+- **Per-Step Breakdown**: See cost/tokens per workflow step
+
+View in:
+- Agent run details (Logs & Results tab)
+- Orchestration status page
+- Run history
+
+---
+
+## Running Database Migrations
+
+After pulling new changes, always run migrations:
+
+```bash
+cd backend
+source venv/bin/activate
+alembic upgrade head
+```
+
+This ensures your database schema is up-to-date with the latest features.
 
 ---
 

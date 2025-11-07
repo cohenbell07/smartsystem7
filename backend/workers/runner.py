@@ -14,6 +14,8 @@ from app.models import (
     Run,
     RunStatus,
     Artifact,
+    Orchestration,
+    Agent,
 )
 from app.research import (
     search_web,
@@ -544,6 +546,204 @@ async def run_agent_prompt_job(run_id: int):
             run.logs += f"\nError: {str(e)}\n"
             run.completed_at = datetime.utcnow()
             session.add(run)
+            session.commit()
+
+
+async def run_orchestration_job(orchestration_id: int):
+    """
+    Execute a multi-agent orchestration.
+
+    Coordinates multiple agents to work on a task collaboratively.
+    Supports strategies: manager-led, sequential, parallel.
+    """
+    logger.info(f"Starting orchestration job {orchestration_id}")
+
+    with Session(engine) as session:
+        orchestration = session.get(Orchestration, orchestration_id)
+        if not orchestration:
+            logger.error(f"Orchestration {orchestration_id} not found")
+            return
+
+        try:
+            # Update status
+            orchestration.status = RunStatus.RUNNING
+            orchestration.started_at = datetime.utcnow()
+            orchestration.logs = "Starting multi-agent orchestration...\n"
+            session.add(orchestration)
+            session.commit()
+
+            # Get agents
+            agents = []
+            for agent_id in orchestration.agent_ids:
+                agent = session.get(Agent, agent_id)
+                if not agent:
+                    raise Exception(f"Agent {agent_id} not found")
+                agents.append(agent)
+
+            logger.info(f"Orchestrating {len(agents)} agents: {[a.name for a in agents]}")
+
+            # Initialize LLM router and tools
+            llm_router = LLMRouter()
+            from app.agents.tools.vector_memory import VectorMemoryTool
+            from app.agents.tools.browser import BrowserTool
+            from app.agents.tools.github_ops import GitHubTool
+            from app.agents.tools.emailer import EmailTool
+            from app.agents.tools.api_caller import APICaller
+            from app.agents.tools.code_executor import CodeExecutor
+
+            vector_memory = VectorMemoryTool()
+            tools = {
+                "browser": BrowserTool(),
+                "github": GitHubTool(),
+                "email": EmailTool(),
+                "vector_memory": vector_memory,
+                "api_caller": APICaller(),
+                "code_executor": CodeExecutor(),
+            }
+
+            # Execute based on strategy
+            if orchestration.strategy == "manager-led":
+                # Use Agent Manager to coordinate
+                from app.agents.manager import AgentManager
+
+                orchestration.logs += "Using manager-led orchestration strategy...\n"
+                session.add(orchestration)
+                session.commit()
+
+                # Create a composite agent context
+                composite_context = {
+                    "name": "Multi-Agent Orchestrator",
+                    "description": f"Orchestrating {len(agents)} agents: {', '.join([a.name for a in agents])}",
+                    "agents": [
+                        {
+                            "id": a.id,
+                            "name": a.name,
+                            "description": a.description,
+                            "tools": a.agent_spec.get("tools", [])
+                        }
+                        for a in agents
+                    ],
+                    "tools": list(tools.keys())
+                }
+
+                agent_manager = AgentManager(
+                    llm_router=llm_router,
+                    tools=tools,
+                    vector_memory=vector_memory
+                )
+
+                # Execute workflow
+                workflow_results = await agent_manager.execute_workflow(
+                    user_prompt=orchestration.prompt,
+                    agent_id=f"orchestration_{orchestration_id}",
+                    agent_context=composite_context
+                )
+
+                # Update orchestration with results
+                orchestration.outputs = {
+                    "workflow_status": workflow_results.get("status"),
+                    "intent": workflow_results.get("intent", {}),
+                    "steps": workflow_results.get("steps", []),
+                    "sub_agent_results": workflow_results.get("sub_agent_results", []),
+                    "final_output": workflow_results.get("output", "")
+                }
+
+                # Update per-agent outputs
+                for i, sub_result in enumerate(workflow_results.get("sub_agent_results", [])):
+                    if i < len(agents):
+                        agent_id = agents[i].id
+                        orchestration.agent_outputs[str(agent_id)] = sub_result.get("output", "")
+                        orchestration.agent_progress[str(agent_id)] = 100
+
+                # Append logs
+                for log_entry in workflow_results.get("logs", []):
+                    orchestration.logs += f"{log_entry}\n"
+
+            elif orchestration.strategy == "sequential":
+                # Run agents one after another
+                orchestration.logs += "Using sequential orchestration strategy...\n"
+                session.add(orchestration)
+                session.commit()
+
+                results = []
+                for i, agent in enumerate(agents):
+                    orchestration.logs += f"\nExecuting agent {i+1}/{len(agents)}: {agent.name}\n"
+                    orchestration.agent_progress[str(agent.id)] = 0
+                    session.add(orchestration)
+                    session.commit()
+
+                    # Create and execute agent
+                    from app.agents.factory import create_agent_from_spec
+                    agent_graph = create_agent_from_spec(agent.agent_spec)
+
+                    # Run agent with previous results as input
+                    inputs = {
+                        "prompt": orchestration.prompt,
+                        "previous_results": results
+                    }
+
+                    result = agent_graph.invoke(inputs)
+                    results.append(result)
+
+                    orchestration.agent_outputs[str(agent.id)] = str(result.get("outputs", ""))
+                    orchestration.agent_progress[str(agent.id)] = 100
+                    orchestration.logs += f"Agent {agent.name} completed.\n"
+                    session.add(orchestration)
+                    session.commit()
+
+                orchestration.outputs = {
+                    "sequential_results": results,
+                    "final_output": results[-1] if results else {}
+                }
+
+            else:  # parallel
+                # Run agents concurrently
+                orchestration.logs += "Using parallel orchestration strategy...\n"
+                session.add(orchestration)
+                session.commit()
+
+                async def run_agent(agent):
+                    from app.agents.factory import create_agent_from_spec
+                    agent_graph = create_agent_from_spec(agent.agent_spec)
+                    inputs = {"prompt": orchestration.prompt}
+                    return agent_graph.invoke(inputs)
+
+                # Run all agents in parallel
+                tasks = [run_agent(agent) for agent in agents]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Update outputs
+                for i, (agent, result) in enumerate(zip(agents, results)):
+                    if isinstance(result, Exception):
+                        orchestration.agent_outputs[str(agent.id)] = f"Error: {str(result)}"
+                        orchestration.logs += f"Agent {agent.name} failed: {str(result)}\n"
+                    else:
+                        orchestration.agent_outputs[str(agent.id)] = str(result.get("outputs", ""))
+                        orchestration.logs += f"Agent {agent.name} completed.\n"
+
+                    orchestration.agent_progress[str(agent.id)] = 100
+
+                orchestration.outputs = {
+                    "parallel_results": [r if not isinstance(r, Exception) else {"error": str(r)} for r in results]
+                }
+
+            # Mark as completed
+            orchestration.status = RunStatus.COMPLETED
+            orchestration.completed_at = datetime.utcnow()
+            orchestration.logs += "\n✓ Orchestration completed successfully\n"
+
+            session.add(orchestration)
+            session.commit()
+
+            logger.info(f"Orchestration {orchestration_id} completed successfully")
+
+        except Exception as e:
+            logger.error(f"Orchestration {orchestration_id} failed: {e}", exc_info=True)
+            orchestration.status = RunStatus.FAILED
+            orchestration.error = str(e)
+            orchestration.logs += f"\nError: {str(e)}\n"
+            orchestration.completed_at = datetime.utcnow()
+            session.add(orchestration)
             session.commit()
 
 
