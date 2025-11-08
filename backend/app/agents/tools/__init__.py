@@ -7,6 +7,9 @@ from .vector_memory import VectorMemoryTool
 from .code_executor import CodeExecutor
 from .api_caller import APICaller
 from .web_scraper import WebScraper
+from .web_search import WebSearchTool
+from .file_writer import FileWriterTool
+from .memory_manager import MemoryManagerTool
 
 __all__ = [
     "BrowserTool",
@@ -16,4 +19,7 @@ __all__ = [
     "CodeExecutor",
     "APICaller",
     "WebScraper",
+    "WebSearchTool",
+    "FileWriterTool",
+    "MemoryManagerTool",
 ]

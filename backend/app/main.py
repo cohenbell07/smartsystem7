@@ -4,19 +4,23 @@ Agent Factory - FastAPI Main Application
 
 import logging
 import os
+import asyncio
+import json
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Optional, List
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
 
-from app.database import create_db_and_tables, get_session
+from app.database import create_db_and_tables, get_session, engine
 from app.models import (
     Project,
     ProjectStatus,
@@ -425,11 +429,21 @@ async def save_agent(request: SaveAgentRequest, session: Session = Depends(get_s
     if not project.agent_spec:
         raise HTTPException(status_code=400, detail="Project has no agent spec")
 
+    agent_spec_dict = project.agent_spec if isinstance(project.agent_spec, dict) else {}
+
     # Create agent
     agent = Agent(
         name=request.name,
         description=request.description or project.question,
         agent_spec=project.agent_spec,
+        default_model=
+            agent_spec_dict.get("default_model")
+            or agent_spec_dict.get("model")
+            or os.getenv("DEFAULT_LLM", "gpt-4o-mini"),
+        instructions=
+            agent_spec_dict.get("instructions")
+            or agent_spec_dict.get("objective")
+            or project.question,
         source_project_id=project.id,
     )
 
@@ -457,6 +471,7 @@ async def list_agents(session: Session = Depends(get_session)):
                 "id": agent.id,
                 "name": agent.name,
                 "description": agent.description,
+                "default_model": agent.default_model,
                 "run_count": agent.run_count,
                 "success_count": agent.success_count,
                 "created_at": agent.created_at,
@@ -482,6 +497,8 @@ async def get_agent(agent_id: int, session: Session = Depends(get_session)):
         "id": agent.id,
         "name": agent.name,
         "description": agent.description,
+        "default_model": agent.default_model,
+        "instructions": agent.instructions,
         "agent_spec": agent.agent_spec,
         "source_project_id": agent.source_project_id,
         "run_count": agent.run_count,
@@ -663,6 +680,43 @@ async def get_run(run_id: int, session: Session = Depends(get_session)):
             for artifact in artifacts
         ],
     }
+
+
+@app.get("/api/runs/{run_id}/stream")
+async def stream_run(run_id: int):
+    """Stream run logs and status updates in real time via SSE."""
+
+    async def event_generator():
+        last_log_length = 0
+        last_status = None
+
+        while True:
+            with Session(engine) as session:
+                run = session.get(Run, run_id)
+                if not run:
+                    payload = {"event": "error", "data": "Run not found"}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+
+                logs = run.logs or ""
+                if len(logs) > last_log_length:
+                    new_chunk = logs[last_log_length:]
+                    last_log_length = len(logs)
+                    payload = {"event": "log", "data": new_chunk}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                status_value = run.status.value if isinstance(run.status, RunStatus) else str(run.status)
+                if status_value != last_status:
+                    last_status = status_value
+                    payload = {"event": "status", "data": status_value}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                if run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                    break
+
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/settings/secrets")
@@ -1092,6 +1146,47 @@ async def get_orchestration(
         "completed_at": orchestration.completed_at,
         "created_at": orchestration.created_at
     }
+
+
+@app.get("/api/orchestrations/{orchestration_id}/stream")
+async def stream_orchestration(orchestration_id: int):
+    """Stream orchestration logs and status updates via SSE."""
+
+    async def event_generator():
+        last_log_length = 0
+        last_status = None
+
+        while True:
+            with Session(engine) as session:
+                orchestration = session.get(Orchestration, orchestration_id)
+                if not orchestration:
+                    payload = {"event": "error", "data": "Orchestration not found"}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+
+                logs = orchestration.logs or ""
+                if len(logs) > last_log_length:
+                    new_chunk = logs[last_log_length:]
+                    last_log_length = len(logs)
+                    payload = {"event": "log", "data": new_chunk}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                status_value = (
+                    orchestration.status.value
+                    if isinstance(orchestration.status, RunStatus)
+                    else str(orchestration.status)
+                )
+                if status_value != last_status:
+                    last_status = status_value
+                    payload = {"event": "status", "data": status_value}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                if orchestration.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                    break
+
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

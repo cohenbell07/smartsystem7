@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getAgents, createOrchestration, getOrchestration } from '@/lib/api'
+import { API_BASE, getAgents, createOrchestration, getOrchestration } from '@/lib/api'
 
 type Agent = {
   id: number
@@ -10,6 +10,8 @@ type Agent = {
   description: string
   run_count: number
   success_count: number
+  default_model?: string
+  instructions?: string
 }
 
 export default function OrchestrationsPage() {
@@ -22,33 +24,14 @@ export default function OrchestrationsPage() {
   const [running, setRunning] = useState(false)
   const [orchestrationId, setOrchestrationId] = useState<number | null>(null)
   const [orchestrationStatus, setOrchestrationStatus] = useState<any>(null)
+  const [orchestrationLogs, setOrchestrationLogs] = useState('')
+  const [streamStatus, setStreamStatus] = useState<string | null>(null)
+  const [streamingOrchestrationId, setStreamingOrchestrationId] = useState<number | null>(null)
+  const eventSourceRef = useRef<EventSource | null>(null)
+  const orchestrationLogsEndRef = useRef<HTMLDivElement | null>(null)
+  const lastRefreshRef = useRef<number>(0)
 
-  useEffect(() => {
-    loadAgents()
-  }, [])
-
-  useEffect(() => {
-    if (orchestrationId) {
-      // Poll for orchestration status
-      const interval = setInterval(async () => {
-        try {
-          const status = await getOrchestration(orchestrationId)
-          setOrchestrationStatus(status)
-
-          if (status.status === 'completed' || status.status === 'failed') {
-            clearInterval(interval)
-            setRunning(false)
-          }
-        } catch (error) {
-          console.error('Failed to poll orchestration:', error)
-        }
-      }, 2000)
-
-      return () => clearInterval(interval)
-    }
-  }, [orchestrationId])
-
-  const loadAgents = async () => {
+  const loadAgents = useCallback(async () => {
     try {
       setLoading(true)
       const data = await getAgents()
@@ -58,7 +41,110 @@ export default function OrchestrationsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  const stopOrchestrationStream = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
+    setStreamingOrchestrationId(null)
+  }, [])
+
+  const refreshOrchestration = useCallback(
+    async (id: number, finalize: boolean = false) => {
+      try {
+        const status = await getOrchestration(id)
+        lastRefreshRef.current = Date.now()
+        setOrchestrationStatus((prev: any) => {
+          if (eventSourceRef.current && !finalize) {
+            return {
+              ...status,
+              logs: prev?.logs ?? '',
+            }
+          }
+          return status
+        })
+
+        setStreamStatus(status.status)
+
+        if (!eventSourceRef.current || finalize) {
+          setOrchestrationLogs(status.logs || '')
+        }
+
+        if (finalize) {
+          setRunning(false)
+        }
+      } catch (error) {
+        console.error('Failed to refresh orchestration:', error)
+      }
+    },
+    []
+  )
+
+  const startOrchestrationStream = useCallback(
+    (id: number) => {
+      stopOrchestrationStream()
+      setStreamingOrchestrationId(id)
+      setOrchestrationLogs('')
+      setStreamStatus('running')
+
+      const source = new EventSource(`${API_BASE}/api/orchestrations/${id}/stream`)
+      eventSourceRef.current = source
+
+      source.onmessage = async (event) => {
+        try {
+          const payload = JSON.parse(event.data)
+
+          if (payload.event === 'log') {
+            setOrchestrationLogs((prev) => prev + payload.data)
+            setOrchestrationStatus((prev: any) =>
+              prev
+                ? { ...prev, logs: ((prev.logs || '') + payload.data) }
+                : prev
+            )
+            if (Date.now() - lastRefreshRef.current > 1000) {
+              await refreshOrchestration(id)
+            }
+          } else if (payload.event === 'status') {
+            setStreamStatus(payload.data)
+            const isFinal = payload.data === 'completed' || payload.data === 'failed'
+            await refreshOrchestration(id, isFinal)
+            if (isFinal) {
+              stopOrchestrationStream()
+            }
+          } else if (payload.event === 'error') {
+            console.error('Orchestration stream error:', payload.data)
+          }
+        } catch (error) {
+          console.error('Failed to parse orchestration stream event:', error)
+        }
+      }
+
+      source.onerror = () => {
+        console.error('Orchestration stream encountered an error, closing connection')
+        stopOrchestrationStream()
+        setRunning(false)
+      }
+    },
+    [refreshOrchestration, stopOrchestrationStream]
+  )
+
+  useEffect(() => {
+    loadAgents()
+  }, [loadAgents])
+
+  useEffect(() => {
+    return () => {
+      stopOrchestrationStream()
+    }
+  }, [stopOrchestrationStream])
+
+  useEffect(() => {
+    if (orchestrationLogsEndRef.current) {
+      orchestrationLogsEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [orchestrationLogs, orchestrationStatus?.logs])
 
   const toggleAgent = (agentId: number) => {
     if (selectedAgentIds.includes(agentId)) {
@@ -76,22 +162,26 @@ export default function OrchestrationsPage() {
 
     try {
       setRunning(true)
+      setOrchestrationLogs('')
+      setStreamStatus('running')
       const result = await createOrchestration(selectedAgentIds, prompt, strategy)
       setOrchestrationId(result.orchestration_id)
-
-      // Start polling
-      const status = await getOrchestration(result.orchestration_id)
-      setOrchestrationStatus(status)
+      startOrchestrationStream(result.orchestration_id)
+      await refreshOrchestration(result.orchestration_id)
     } catch (error) {
       console.error('Failed to start orchestration:', error)
       alert('Failed to start orchestration')
       setRunning(false)
+      stopOrchestrationStream()
     }
   }
 
   const handleReset = () => {
+    stopOrchestrationStream()
     setOrchestrationId(null)
     setOrchestrationStatus(null)
+    setOrchestrationLogs('')
+    setStreamStatus(null)
     setRunning(false)
     setPrompt('')
   }
@@ -108,6 +198,30 @@ export default function OrchestrationsPage() {
   }
 
   if (orchestrationStatus) {
+    const status = (streamStatus || orchestrationStatus.status || '').toLowerCase()
+    const isCompleted = status === 'completed'
+    const isFailed = status === 'failed'
+    const isRunning = status === 'running'
+    const statusColor = isCompleted
+      ? 'text-green-600'
+      : isFailed
+      ? 'text-red-600'
+      : isRunning
+      ? 'text-blue-600'
+      : 'text-gray-600'
+    const statusLabel = isCompleted
+      ? '✅ Completed'
+      : isFailed
+      ? '❌ Failed'
+      : isRunning
+      ? '🟡 Running'
+      : status || 'unknown'
+    const logsToDisplay = orchestrationLogs || orchestrationStatus.logs || ''
+    const nodeMetrics: Array<Record<string, any>> =
+      (Array.isArray(orchestrationStatus.outputs?.node_metrics)
+        ? orchestrationStatus.outputs?.node_metrics
+        : undefined) ?? []
+
     return (
       <div className="min-h-screen bg-gray-50 p-8">
         <div className="max-w-4xl mx-auto">
@@ -118,12 +232,9 @@ export default function OrchestrationsPage() {
                   Orchestration #{orchestrationStatus.id}
                 </h1>
                 <p className="text-sm text-gray-500">
-                  Status: <span className={`font-semibold ${
-                    orchestrationStatus.status === 'completed' ? 'text-green-600' :
-                    orchestrationStatus.status === 'failed' ? 'text-red-600' :
-                    'text-blue-600'
-                  }`}>
-                    {orchestrationStatus.status}
+                  Status:{' '}
+                  <span className={`font-semibold ${statusColor}`}>
+                    {statusLabel}
                   </span>
                 </p>
                 {orchestrationStatus.strategy && (
@@ -132,6 +243,12 @@ export default function OrchestrationsPage() {
                   </p>
                 )}
               </div>
+              {isRunning && (
+                <div className="flex items-center gap-2 text-blue-600 text-sm">
+                  <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
+                  <span>Running orchestration...</span>
+                </div>
+              )}
               <button
                 onClick={handleReset}
                 className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
@@ -160,6 +277,48 @@ export default function OrchestrationsPage() {
                     🔤 Total Tokens: {orchestrationStatus.total_tokens.toLocaleString()}
                   </span>
                 )}
+              </div>
+            )}
+
+            {nodeMetrics.length > 0 && (
+              <div className="mb-6">
+                <h3 className="font-semibold mb-2">Node Metrics</h3>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm text-left text-gray-600 border border-gray-200">
+                    <thead className="bg-gray-100 text-xs uppercase text-gray-500">
+                      <tr>
+                        <th className="px-3 py-2">Node</th>
+                        <th className="px-3 py-2">Type</th>
+                        <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Model</th>
+                        <th className="px-3 py-2">Cost</th>
+                        <th className="px-3 py-2">Tokens</th>
+                        <th className="px-3 py-2">Completed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nodeMetrics.map((metric, index) => (
+                        <tr key={`${metric.node}-${index}`} className="border-t border-gray-200">
+                          <td className="px-3 py-2 font-medium text-gray-900">{metric.node}</td>
+                          <td className="px-3 py-2 capitalize">{metric.type || '-'}</td>
+                          <td className="px-3 py-2 capitalize">{metric.status || '-'}</td>
+                          <td className="px-3 py-2">{metric.model || '-'}</td>
+                          <td className="px-3 py-2">
+                            {typeof metric.cost === 'number' ? `$${metric.cost.toFixed(4)}` : '—'}
+                          </td>
+                          <td className="px-3 py-2">
+                            {metric.tokens != null ? Number(metric.tokens).toLocaleString() : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-500">
+                            {metric.completed_at
+                              ? new Date(metric.completed_at).toLocaleString()
+                              : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
@@ -192,11 +351,12 @@ export default function OrchestrationsPage() {
             )}
 
             {/* Logs */}
-            {orchestrationStatus.logs && (
+            {(logsToDisplay || isRunning) && (
               <div className="mb-6">
                 <h3 className="font-semibold mb-2">Execution Logs</h3>
                 <div className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto max-h-96 font-mono text-sm whitespace-pre-wrap">
-                  {orchestrationStatus.logs}
+                  {logsToDisplay || 'Waiting for logs...'}
+                  <div ref={orchestrationLogsEndRef} />
                 </div>
               </div>
             )}
@@ -226,7 +386,11 @@ export default function OrchestrationsPage() {
                           {agent?.name || `Agent #${agentId}`}
                         </summary>
                         <div className="p-4 bg-gray-50 border-t border-gray-200">
-                          <pre className="text-sm whitespace-pre-wrap">{output}</pre>
+                          <pre className="text-sm whitespace-pre-wrap">
+                            {typeof output === 'string'
+                              ? output
+                              : JSON.stringify(output, null, 2)}
+                          </pre>
                         </div>
                       </details>
                     )
@@ -283,6 +447,11 @@ export default function OrchestrationsPage() {
                   {agent.description && (
                     <div className="text-sm text-gray-600 mt-1 line-clamp-2">
                       {agent.description}
+                    </div>
+                  )}
+                  {agent.default_model && (
+                    <div className="text-xs text-gray-500 mt-1">
+                      Model: {agent.default_model}
                     </div>
                   )}
                   <div className="text-xs text-gray-500 mt-2">

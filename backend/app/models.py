@@ -90,7 +90,9 @@ class Agent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     description: Optional[str] = None
-    agent_spec: dict = Field(sa_column=Column(JSON))  # Full AgentSpec
+    agent_spec: dict = Field(sa_column=Column(JSON, nullable=False))  # Full AgentSpec
+    default_model: str = Field(default="gpt-4o-mini")
+    instructions: Optional[str] = None
 
     # Links back to original project
     source_project_id: Optional[int] = Field(default=None, foreign_key="projects.id")
@@ -204,18 +206,18 @@ class Orchestration(SQLModel, table=True):
     __tablename__ = "orchestrations"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    agent_ids: list[int] = Field(sa_column=Column(JSON))  # List of agent IDs to orchestrate
+    agent_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))  # List of agent IDs to orchestrate
     prompt: str  # Task prompt
     strategy: str = Field(default="manager-led")  # "sequential", "parallel", "manager-led"
 
     status: RunStatus = Field(default=RunStatus.QUEUED)
 
     # Per-agent progress tracking
-    agent_progress: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # {agent_id: progress_pct}
-    agent_outputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))  # {agent_id: output}
+    agent_progress: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))  # {agent_id: progress_pct}
+    agent_outputs: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))  # {agent_id: output}
 
     # Overall outputs
-    outputs: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    outputs: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     logs: Optional[str] = None
     error: Optional[str] = None
 

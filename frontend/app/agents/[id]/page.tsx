@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'next/navigation'
 import {
+  API_BASE,
   getAgent,
   runAgentWithPrompt,
   getRun,
@@ -16,6 +17,8 @@ type Agent = {
   id: number
   name: string
   description: string
+  default_model?: string
+  instructions?: string
   agent_spec: any
   source_project_id?: number
   run_count: number
@@ -29,6 +32,8 @@ type Agent = {
     started_at?: string
     completed_at?: string
     prompt?: string
+    total_cost?: number
+    total_tokens?: number
   }>
 }
 
@@ -51,7 +56,12 @@ export default function AgentDetailPage() {
   const [prompt, setPrompt] = useState('')
   const [currentRun, setCurrentRun] = useState<Run | null>(null)
   const [running, setRunning] = useState(false)
-  const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null)
+const eventSourceRef = useRef<EventSource | null>(null)
+const logsEndRef = useRef<HTMLDivElement | null>(null)
+const [liveLogs, setLiveLogs] = useState('')
+const [currentStatus, setCurrentStatus] = useState<string | null>(null)
+const [latestRunSummary, setLatestRunSummary] = useState<Run | null>(null)
+const [streamingRunId, setStreamingRunId] = useState<number | null>(null)
 
   // API key modal
   const [showKeyModal, setShowKeyModal] = useState(false)
@@ -62,44 +72,70 @@ export default function AgentDetailPage() {
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
   const [creatingRepo, setCreatingRepo] = useState(false)
 
-  useEffect(() => {
-    loadAgent()
-  }, [agentId])
-
-  useEffect(() => {
-    // Cleanup polling on unmount
-    return () => {
-      if (pollingInterval) {
-        clearInterval(pollingInterval)
-      }
-    }
-  }, [pollingInterval])
-
-  const loadAgent = async () => {
-    try {
-      setLoading(true)
-      const data = await getAgent(parseInt(agentId))
-      setAgent(data)
-
-      // Load files if repo exists
-      if (data.repo_url) {
-        loadFiles()
-      }
-    } catch (error) {
-      console.error('Failed to load agent:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const loadFiles = async () => {
+  const loadFiles = useCallback(async () => {
     try {
       const data = await getAgentFiles(parseInt(agentId))
       setFiles(data.files || [])
     } catch (error) {
       console.error('Failed to load files:', error)
     }
-  }
+  }, [agentId])
+
+  const loadAgent = useCallback(
+    async (withLoader: boolean = true) => {
+      try {
+        if (withLoader) {
+          setLoading(true)
+        }
+
+        const data = await getAgent(parseInt(agentId))
+        setAgent(data)
+
+        if (data.repo_url) {
+          loadFiles()
+        } else {
+          setFiles([])
+          setSelectedFile(null)
+        }
+
+        if (data.runs && data.runs.length > 0) {
+          const latestRunId = data.runs[0].id
+          try {
+            const latestRun = await getRun(latestRunId)
+            setLatestRunSummary(latestRun)
+
+            if (!eventSourceRef.current || streamingRunId !== latestRunId) {
+              setCurrentRun((prev) => {
+                if (!prev) {
+                  return latestRun
+                }
+                if (prev.id === latestRunId) {
+                  return { ...prev, ...latestRun }
+                }
+                return prev
+              })
+
+              if (!eventSourceRef.current) {
+                setLiveLogs(latestRun.logs || '')
+              }
+            }
+          } catch (error) {
+            console.error('Failed to load latest run summary:', error)
+            setLatestRunSummary(null)
+          }
+        } else {
+          setLatestRunSummary(null)
+        }
+      } catch (error) {
+        console.error('Failed to load agent:', error)
+      } finally {
+        if (withLoader) {
+          setLoading(false)
+        }
+      }
+    },
+    [agentId, loadFiles, streamingRunId]
+  )
 
   const handleCreateRepo = async () => {
     if (creatingRepo) return
@@ -107,7 +143,7 @@ export default function AgentDetailPage() {
     try {
       setCreatingRepo(true)
       await createAgentRepo(parseInt(agentId))
-      await loadAgent()
+      await loadAgent(false)
       alert('Repository created successfully!')
     } catch (error: any) {
       if (error.status === 428) {
@@ -123,43 +159,115 @@ export default function AgentDetailPage() {
     }
   }
 
-  const startPolling = (runId: number) => {
-    // Poll every 2 seconds
-    const interval = setInterval(async () => {
+  const stopRunStream = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
+    setStreamingRunId(null)
+  }, [])
+
+  const refreshRun = useCallback(
+    async (runId: number, finalize: boolean = false) => {
       try {
         const runData = await getRun(runId)
-        setCurrentRun(runData)
+        setCurrentRun((prev) => {
+          if (prev && prev.id === runId) {
+            const mergedLogs =
+              finalize || !eventSourceRef.current ? runData.logs ?? prev.logs : prev.logs
+            return { ...prev, ...runData, logs: mergedLogs }
+          }
+          return runData
+        })
+        setCurrentStatus(runData.status)
 
-        // Stop polling if completed or failed
-        if (runData.status === 'completed' || runData.status === 'failed') {
-          clearInterval(interval)
-          setPollingInterval(null)
-          setRunning(false)
-          // Reload agent to update run history
-          loadAgent()
+        if (finalize) {
+          setLiveLogs(runData.logs || '')
+          setLatestRunSummary(runData)
+          await loadAgent(false)
         }
       } catch (error) {
-        console.error('Failed to poll run:', error)
+        console.error('Failed to refresh run:', error)
       }
-    }, 2000)
+    },
+    [loadAgent]
+  )
 
-    setPollingInterval(interval)
-  }
+  const startRunStream = useCallback(
+    (runId: number) => {
+      stopRunStream()
+      setStreamingRunId(runId)
+      setLiveLogs('')
+      setCurrentStatus('running')
+
+      const source = new EventSource(`${API_BASE}/api/runs/${runId}/stream`)
+      eventSourceRef.current = source
+
+      source.onmessage = async (event) => {
+        try {
+          const payload = JSON.parse(event.data)
+
+          if (payload.event === 'log') {
+            setLiveLogs((prev) => prev + payload.data)
+            setCurrentRun((prev) =>
+              prev && prev.id === runId
+                ? { ...prev, logs: ((prev.logs || '') + payload.data) }
+                : prev
+            )
+          } else if (payload.event === 'status') {
+            setCurrentStatus(payload.data)
+            if (payload.data === 'completed' || payload.data === 'failed') {
+              stopRunStream()
+              setRunning(false)
+              await refreshRun(runId, true)
+            } else {
+              await refreshRun(runId)
+            }
+          } else if (payload.event === 'error') {
+            console.error('Run stream error:', payload.data)
+          }
+        } catch (error) {
+          console.error('Failed to parse run stream event:', error)
+        }
+      }
+
+      source.onerror = () => {
+        console.error('Run stream encountered an error, closing connection')
+        stopRunStream()
+        setRunning(false)
+      }
+    },
+    [refreshRun, stopRunStream]
+  )
+
+  useEffect(() => {
+    loadAgent()
+
+    return () => {
+      stopRunStream()
+    }
+  }, [agentId, loadAgent, stopRunStream])
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [liveLogs, currentRun?.logs])
 
   const handleRunPrompt = async () => {
     if (!prompt.trim() || running) return
 
     try {
       setRunning(true)
+      stopRunStream()
+      setLiveLogs('')
+      setCurrentRun(null)
+      setCurrentStatus('running')
       const result = await runAgentWithPrompt(parseInt(agentId), prompt)
 
-      // Start polling for updates
-      startPolling(result.run_id)
-
-      // Load initial run data
-      const runData = await getRun(result.run_id)
-      setCurrentRun(runData)
       setActiveTab('logs')
+      startRunStream(result.run_id)
+      await refreshRun(result.run_id)
     } catch (error: any) {
       console.error('Failed to run agent:', error)
 
@@ -168,9 +276,11 @@ export default function AgentDetailPage() {
         setMissingKeys(error.missing_with_instructions || [])
         setShowKeyModal(true)
         setRunning(false)
+        stopRunStream()
       } else {
         alert('Failed to run agent. Please try again.')
         setRunning(false)
+        stopRunStream()
       }
     }
   }
@@ -215,8 +325,15 @@ export default function AgentDetailPage() {
                 key={run.id}
                 className="p-4 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer"
                 onClick={async () => {
-                  const runData = await getRun(run.id)
-                  setCurrentRun(runData)
+                  stopRunStream()
+                  try {
+                    const runData = await getRun(run.id)
+                    setCurrentRun(runData)
+                    setLiveLogs(runData.logs || '')
+                    setCurrentStatus(runData.status)
+                  } catch (error) {
+                    console.error('Failed to load run:', error)
+                  }
                   setActiveTab('logs')
                 }}
               >
@@ -262,6 +379,33 @@ export default function AgentDetailPage() {
       )
     }
 
+    const status = (currentStatus || currentRun.status || '').toLowerCase()
+    const isCompleted = status === 'completed'
+    const isFailed = status === 'failed'
+    const isRunning = status === 'running'
+    const statusColor = isCompleted
+      ? 'text-green-600'
+      : isFailed
+      ? 'text-red-600'
+      : isRunning
+      ? 'text-blue-600'
+      : 'text-gray-600'
+    const statusLabel = isCompleted
+      ? '✅ Completed'
+      : isFailed
+      ? '❌ Failed'
+      : isRunning
+      ? '🟡 Running'
+      : status || 'unknown'
+    const displayCost =
+      currentRun.total_cost ?? currentRun.actual_cost ?? currentRun.cost_estimate ?? null
+    const tokens = currentRun.total_tokens || null
+    const logsToDisplay = liveLogs || currentRun.logs || ''
+    const nodeMetrics: Array<Record<string, any>> =
+      (Array.isArray(currentRun.outputs?.node_metrics) ? currentRun.outputs?.node_metrics : undefined) ??
+      (currentRun as any).node_metrics ??
+      []
+
     return (
       <div className="space-y-6">
         <div>
@@ -269,33 +413,29 @@ export default function AgentDetailPage() {
             <div>
               <h3 className="text-lg font-semibold">Run #{currentRun.id}</h3>
               <p className="text-sm text-gray-500">
-                Status: <span className={`font-semibold ${
-                  currentRun.status === 'completed' ? 'text-green-600' :
-                  currentRun.status === 'failed' ? 'text-red-600' :
-                  currentRun.status === 'running' ? 'text-blue-600' :
-                  'text-gray-600'
-                }`}>
-                  {currentRun.status}
+                Status:{' '}
+                <span className={`font-semibold ${statusColor}`}>
+                  {statusLabel}
                 </span>
               </p>
 
               {/* Cost and Token Display */}
-              {(currentRun.total_cost || currentRun.total_tokens) && (
+              {(displayCost || tokens) && (
                 <div className="mt-2 flex gap-4 text-xs">
-                  {currentRun.total_cost && (
+                  {displayCost && (
                     <span className="px-2 py-1 bg-green-50 text-green-700 rounded">
-                      💰 Cost: ${currentRun.total_cost.toFixed(4)}
+                      💰 Cost: ${displayCost.toFixed(4)}
                     </span>
                   )}
-                  {currentRun.total_tokens && (
+                  {tokens && (
                     <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">
-                      🔤 Tokens: {currentRun.total_tokens.toLocaleString()}
+                      🔤 Tokens: {tokens.toLocaleString()}
                     </span>
                   )}
                 </div>
               )}
             </div>
-            {running && (
+            {isRunning && (
               <div className="flex items-center gap-2 text-blue-600">
                 <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
                 <span className="text-sm">Running...</span>
@@ -311,27 +451,80 @@ export default function AgentDetailPage() {
           )}
         </div>
 
+        {nodeMetrics.length > 0 && (
+          <div>
+            <h4 className="font-semibold mb-2">Node Metrics</h4>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm text-left text-gray-600 border border-gray-200">
+                <thead className="bg-gray-100 text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2">Node</th>
+                    <th className="px-3 py-2">Type</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2">Model</th>
+                    <th className="px-3 py-2">Cost</th>
+                    <th className="px-3 py-2">Tokens</th>
+                    <th className="px-3 py-2">Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nodeMetrics.map((metric, index) => (
+                    <tr key={`${metric.node}-${index}`} className="border-t border-gray-200">
+                      <td className="px-3 py-2 font-medium text-gray-900">{metric.node}</td>
+                      <td className="px-3 py-2 capitalize">{metric.type || '-'}</td>
+                      <td className="px-3 py-2 capitalize">{metric.status || '-'}</td>
+                      <td className="px-3 py-2">{metric.model || '-'}</td>
+                      <td className="px-3 py-2">
+                        {typeof metric.cost === 'number' ? `$${metric.cost.toFixed(4)}` : '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        {metric.tokens != null ? Number(metric.tokens).toLocaleString() : '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        {metric.duration != null
+                          ? `${metric.duration.toFixed?.(2) ?? metric.duration}s`
+                          : metric.started_at && metric.completed_at
+                          ? `${new Date(metric.started_at).toLocaleTimeString()} → ${new Date(metric.completed_at).toLocaleTimeString()}`
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         <div>
           <h4 className="font-semibold mb-2">Execution Logs</h4>
           <div className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto max-h-96 font-mono text-sm whitespace-pre-wrap">
-            {currentRun.logs || 'No logs available yet...'}
+            {logsToDisplay || 'No logs available yet...'}
+            <div ref={logsEndRef} />
           </div>
         </div>
 
         {currentRun.outputs && (
-          <div>
-            <h4 className="font-semibold mb-2">Output</h4>
-            <div className="bg-white p-4 border border-gray-200 rounded-lg">
-              {currentRun.outputs.final_output ? (
-                <div className="prose max-w-none">
-                  <pre className="whitespace-pre-wrap text-sm">{currentRun.outputs.final_output}</pre>
-                </div>
-              ) : (
-                <pre className="text-sm text-gray-600">{JSON.stringify(currentRun.outputs, null, 2)}</pre>
-              )}
-            </div>
-          </div>
-        )}
+  <div>
+    <h4 className="font-semibold mb-2">Output</h4>
+    <div className="bg-white p-4 border border-gray-200 rounded-lg">
+      {/* If a simple text or final output is available */}
+      {typeof currentRun.outputs === 'string' ? (
+        <pre className="whitespace-pre-wrap text-sm text-gray-800">{currentRun.outputs}</pre>
+      ) : currentRun.outputs.final_output ? (
+        <div className="prose max-w-none">
+          <pre className="whitespace-pre-wrap text-sm text-gray-800">
+            {currentRun.outputs.final_output}
+          </pre>
+        </div>
+      ) : (
+        // Safe JSON fallback for complex objects
+        <pre className="text-sm text-gray-600 whitespace-pre-wrap">
+          {JSON.stringify(currentRun.outputs, null, 2)}
+        </pre>
+      )}
+    </div>
+  </div>
+)}
 
         {currentRun.artifacts && currentRun.artifacts.length > 0 && (
           <div>
@@ -532,6 +725,10 @@ export default function AgentDetailPage() {
     )
   }
 
+  const summaryRun = currentRun ?? latestRunSummary
+  const summaryCost = summaryRun?.total_cost ?? summaryRun?.actual_cost ?? null
+  const summaryTokens = summaryRun?.total_tokens ?? null
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* API Key Modal */}
@@ -576,6 +773,74 @@ export default function AgentDetailPage() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Agent Summary Panel */}
+        <div className="grid gap-4 md:grid-cols-3 mb-6">
+          <div className="bg-white rounded-lg shadow-sm p-4">
+            <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+              Default Model
+            </h3>
+            <p className="mt-2 text-lg font-semibold text-gray-900">
+              {agent.default_model || 'Not specified'}
+            </p>
+            {agent.agent_spec?.tools?.length ? (
+              <p className="mt-3 text-sm text-gray-600">
+                Tools: {agent.agent_spec.tools.join(', ')}
+              </p>
+            ) : (
+              <p className="mt-3 text-sm text-gray-500">No tools detected</p>
+            )}
+          </div>
+
+          <div className="bg-white rounded-lg shadow-sm p-4 md:col-span-2">
+            <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+              Core Instructions
+            </h3>
+            <p className="mt-2 text-sm text-gray-700 whitespace-pre-wrap max-h-48 overflow-auto">
+              {agent.instructions || agent.agent_spec?.objective || 'No instructions provided.'}
+            </p>
+          </div>
+
+          <div className="bg-white rounded-lg shadow-sm p-4 md:col-span-3">
+            <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+              Last Run Snapshot
+            </h3>
+            {summaryRun ? (
+              <div className="mt-3 grid gap-4 md:grid-cols-4 text-sm text-gray-700">
+                <div>
+                  <span className="text-xs text-gray-500 uppercase block">Status</span>
+                  <span className="font-semibold">
+                    {(summaryRun.status || '').toUpperCase()}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 uppercase block">Cost</span>
+                  <span className="font-semibold">
+                    {summaryCost ? `$${summaryCost.toFixed(4)}` : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 uppercase block">Tokens</span>
+                  <span className="font-semibold">
+                    {summaryTokens ? summaryTokens.toLocaleString() : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 uppercase block">Completed</span>
+                  <span className="font-semibold">
+                    {summaryRun.completed_at
+                      ? new Date(summaryRun.completed_at).toLocaleString()
+                      : '—'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-gray-500">
+                This agent has not been executed yet.
+              </p>
+            )}
           </div>
         </div>
 

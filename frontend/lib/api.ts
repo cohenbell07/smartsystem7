@@ -2,7 +2,7 @@
  * API client for Agent Factory backend
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export interface Project {
   id: number
@@ -35,8 +35,12 @@ export interface Run {
   completed_at?: string
   cost_estimate?: number
   actual_cost?: number
+  total_cost?: number
   cost_breakdown?: any
   total_tokens?: number
+  token_usage?: any
+  node_metrics?: Array<Record<string, any>>
+  node_status?: Record<string, string>
   artifacts?: Array<{
     id: number
     name: string
@@ -82,10 +86,10 @@ export async function askQuestion(question: string, email?: string) {
   })
 
   if (!res.ok) {
-    throw new Error('Failed to submit question')
+    throw new Error(`Research request failed: ${res.status}`)
   }
 
-  return res.json()
+  return await res.json()
 }
 
 /**
