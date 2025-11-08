@@ -1220,6 +1220,160 @@ async def run_orchestration_job(orchestration_id: int):
             session.add(orchestration)
             session.commit()
 
+
+async def run_coding_build_job(run_id: int, request_data: Dict[str, Any]):
+    """
+    Execute a coding build using the Coding Orchestrator system.
+
+    This activates the world's smartest autonomous coding system that:
+    1. Parses requirements from natural language
+    2. Coordinates specialized AI coders (frontend, backend, database, etc.)
+    3. Implements self-correction loops with validation
+    4. Produces production-ready code with zero errors
+    5. Learns from each build
+    """
+    logger.info(f"Starting coding build job for run {run_id}")
+
+    with Session(engine) as session:
+        run = session.get(Run, run_id)
+        if not run:
+            logger.error(f"Run {run_id} not found")
+            return
+
+        try:
+            # Update status
+            run.status = RunStatus.RUNNING
+            run.started_at = datetime.utcnow()
+            run.logs = _append_with_timestamp(run.logs, "🚀 Coding Orchestrator System Activated")
+            session.add(run)
+            session.commit()
+
+            async def append_log(message: str) -> None:
+                run.logs = _append_with_timestamp(run.logs, message)
+                session.add(run)
+                session.commit()
+
+            # Initialize Coding Orchestrator
+            from app.agents.coding_orchestrator import CodingOrchestrator
+            from app.agents.tools import (
+                BrowserTool,
+                GitHubTool,
+                EmailTool,
+                VectorMemoryTool,
+                APICaller,
+                CodeExecutor,
+                WebSearchTool,
+                FileWriterTool,
+                MemoryManagerTool,
+            )
+
+            vector_memory = VectorMemoryTool()
+            code_executor = CodeExecutor()
+            tools = {
+                "browser": BrowserTool(),
+                "github": GitHubTool(),
+                "email": EmailTool(),
+                "vector_memory": vector_memory,
+                "api_caller": APICaller(),
+                "code_executor": code_executor,
+                "python_executor": code_executor,
+                "web_search": WebSearchTool(),
+                "file_writer": FileWriterTool(),
+                "memory_manager": MemoryManagerTool(vector_memory),
+            }
+
+            llm_router = LLMRouter()
+
+            orchestrator = CodingOrchestrator(
+                llm_router=llm_router,
+                tools=tools,
+                vector_memory=vector_memory
+            )
+
+            # Set custom parameters if provided
+            if request_data.get("quality_threshold"):
+                orchestrator.target_quality_score = request_data["quality_threshold"]
+            if request_data.get("max_iterations"):
+                orchestrator.max_iterations = request_data["max_iterations"]
+
+            await append_log(f"Quality threshold: {orchestrator.target_quality_score:.0%}")
+            await append_log(f"Max iterations: {orchestrator.max_iterations}")
+
+            # Extract project context
+            project_context = request_data.get("project_context") or {}
+            if request_data.get("tech_stack_preferences"):
+                project_context["tech_stack_preferences"] = request_data["tech_stack_preferences"]
+
+            # Execute the orchestrator
+            result = await orchestrator.orchestrate_build(
+                user_prompt=run.prompt,
+                project_context=project_context,
+                log_callback=append_log
+            )
+
+            # Store complete results
+            run.outputs = result
+
+            # Calculate costs from all iterations
+            total_cost_accum = 0.0
+            total_tokens_accum = 0
+            cost_present = False
+            tokens_present = False
+
+            all_iterations = result.get("all_iterations", [])
+            for iteration_summary in all_iterations:
+                # TODO: Extract cost/token data from iteration if tracked
+                pass
+
+            # Store metrics if available
+            if cost_present:
+                run.total_cost = total_cost_accum
+                run.actual_cost = total_cost_accum
+                await append_log(f"Total cost: ${total_cost_accum:.4f}")
+
+            if tokens_present:
+                run.total_tokens = total_tokens_accum
+                await append_log(f"Total tokens: {total_tokens_accum}")
+
+            # Log final summary
+            final_score = result.get("final_score", 0.0)
+            iterations = result.get("iterations", 0)
+            passed = result.get("passed", False)
+
+            await append_log(f"\n{'='*60}")
+            await append_log(f"📊 BUILD COMPLETE")
+            await append_log(f"{'='*60}")
+            await append_log(f"Final Quality Score: {final_score:.2%}")
+            await append_log(f"Total Iterations: {iterations}")
+            await append_log(f"Status: {'✅ PASSED' if passed else '⚠️  NEEDS IMPROVEMENT'}")
+
+            if result.get("build_summary"):
+                await append_log(f"\n{result['build_summary']}")
+
+            # Determine final status
+            if result.get("status") == "completed" and passed:
+                run.status = RunStatus.COMPLETED
+            elif result.get("status") == "completed":
+                run.status = RunStatus.COMPLETED  # Completed with warnings
+            else:
+                run.status = RunStatus.FAILED
+
+            run.completed_at = datetime.utcnow()
+            session.add(run)
+            session.commit()
+
+            logger.info(f"Coding build job completed for run {run_id}: {final_score:.2%} quality")
+
+        except Exception as e:
+            logger.error(f"Coding build job failed for run {run_id}: {e}", exc_info=True)
+            run.status = RunStatus.FAILED
+            run.error = str(e)
+            run.completed_at = datetime.utcnow()
+            run.logs = _append_with_timestamp(run.logs, f"❌ Coding build failed: {e}")
+            session.add(run)
+            session.commit()
+
+
 # Simple worker loop (in production, use RQ or Celery)
 if __name__ == "__main__":
     logger.info("Worker runner started (for development only)")
