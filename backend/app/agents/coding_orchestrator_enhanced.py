@@ -6,6 +6,7 @@ This module extends the base CodingOrchestrator with:
 - Docker-based execution validation
 - Automatic GitHub repository creation
 - Automatic Vercel deployment
+- Memory DB integration for build history tracking
 """
 
 import logging
@@ -13,6 +14,7 @@ import json
 from typing import Dict, Any, Optional
 import re
 import uuid
+import time
 
 from .coding_orchestrator import CodingOrchestrator
 
@@ -39,7 +41,8 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
         model_router=None,
         docker_executor=None,
         github_client=None,
-        vercel_client=None
+        vercel_client=None,
+        memory_db=None
     ):
         """
         Initialize enhanced orchestrator.
@@ -53,6 +56,7 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
             docker_executor: Docker executor for validation
             github_client: GitHub client for repo creation
             vercel_client: Vercel client for deployment
+            memory_db: Memory DB for build history tracking
         """
         super().__init__(llm_router, tools, vector_memory)
 
@@ -61,6 +65,7 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
         self.docker_executor = docker_executor
         self.github_client = github_client
         self.vercel_client = vercel_client
+        self.memory_db = memory_db
 
         logger.info("Enhanced Coding Orchestrator initialized")
 
@@ -357,6 +362,7 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
         - Docker validation
         - GitHub repository creation
         - Vercel deployment
+        - Memory DB logging
 
         Args:
             user_prompt: What to build
@@ -367,6 +373,9 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
         Returns:
             Complete build result with deployment URLs
         """
+        # Track build duration
+        start_time = time.time()
+
         # Run base orchestration
         result = await self.orchestrate_build(
             user_prompt=user_prompt,
@@ -375,6 +384,18 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
         )
 
         if result.get("status") != "completed":
+            # Save failed build to memory DB
+            if self.memory_db and run_id:
+                duration_sec = time.time() - start_time
+                await self.memory_db.save_build(
+                    run_id=run_id,
+                    prompt=user_prompt,
+                    quality=0.0,
+                    model_map={},
+                    duration_sec=duration_sec,
+                    status="failed",
+                    error=result.get("error", "Unknown error")
+                )
             return result
 
         # Get build outputs
@@ -388,6 +409,21 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
                 await log_callback(f"\n⚠️  Quality score too low ({final_score:.2%}) - skipping deployment")
             result["deployment_skipped"] = True
             result["deployment_skip_reason"] = f"quality_too_low ({final_score:.2%})"
+
+            # Save to memory DB (without deployment)
+            if self.memory_db and run_id:
+                duration_sec = time.time() - start_time
+                await self.memory_db.save_build(
+                    run_id=run_id,
+                    prompt=user_prompt,
+                    quality=final_score,
+                    model_map=result.get("model_usage", {}),
+                    duration_sec=duration_sec,
+                    status="completed",
+                    requirements=requirements,
+                    iterations=result.get("iterations", 1)
+                )
+
             return result
 
         # Step 1: Docker validation
@@ -428,6 +464,28 @@ class EnhancedCodingOrchestrator(CodingOrchestrator):
 
         # Quality metrics
         result["outputs"]["quality"] = final_score
+
+        # Save build to memory DB
+        if self.memory_db:
+            duration_sec = time.time() - start_time
+            await self.memory_db.save_build(
+                run_id=run_id,
+                prompt=user_prompt,
+                quality=final_score,
+                model_map=result.get("model_usage", {}),
+                duration_sec=duration_sec,
+                status="completed",
+                repo_url=deployment_result.get("repo_url"),
+                vercel_url=deployment_result.get("vercel_url"),
+                requirements=requirements,
+                iterations=result.get("iterations", 1),
+                docker_validated=docker_result.get("success", False),
+                github_deployed=deployment_result.get("github_deployed", False),
+                vercel_deployed=deployment_result.get("vercel_deployed", False)
+            )
+
+            if log_callback:
+                await log_callback("\n💾 Build saved to memory database")
 
         if log_callback:
             await log_callback("\n✨ Enhanced orchestration complete!")

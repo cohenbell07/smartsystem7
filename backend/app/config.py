@@ -144,6 +144,12 @@ class Settings(BaseSettings):
         description="Docker container CPU limit (cores)"
     )
 
+    # Memory & Telemetry Database
+    MEMORY_DB_PATH: str = Field(
+        default="backend/data/memory.sqlite3",
+        description="Path to SQLite database for build history and telemetry"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

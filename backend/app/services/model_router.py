@@ -114,14 +114,16 @@ class ModelRouter:
         ],
     }
 
-    def __init__(self, config):
+    def __init__(self, config, memory_db=None):
         """
         Initialize the model router.
 
         Args:
             config: Application config with API keys
+            memory_db: Optional Memory DB for telemetry logging
         """
         self.config = config
+        self.memory_db = memory_db
         self.performance_metrics: Dict[str, ModelPerformance] = {}
 
         # Check which providers are available
@@ -312,7 +314,11 @@ class ModelRouter:
         model_id: str,
         provider: str,
         success: bool,
-        latency: float
+        latency: float,
+        task_type: Optional[str] = None,
+        tokens_used: Optional[int] = None,
+        cost: Optional[float] = None,
+        run_id: Optional[str] = None
     ):
         """
         Record a model call for performance tracking.
@@ -322,6 +328,10 @@ class ModelRouter:
             provider: Provider name
             success: Whether the call succeeded
             latency: Call latency in seconds
+            task_type: Type of task (optional)
+            tokens_used: Number of tokens used (optional)
+            cost: Estimated cost (optional)
+            run_id: Associated build run ID (optional)
         """
         model_key = f"{provider}:{model_id}"
 
@@ -351,6 +361,39 @@ class ModelRouter:
             f"Recorded call for {model_key}: success={success}, "
             f"latency={latency:.2f}s, performance_score={perf.performance_score:.2f}"
         )
+
+        # Log to Memory DB if available
+        if self.memory_db:
+            import asyncio
+            try:
+                # Run async log in sync context
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're already in an async context, create a task
+                    asyncio.create_task(self.memory_db.log_model_call(
+                        model_name=model_id,
+                        provider=provider,
+                        success=success,
+                        latency=latency,
+                        task_type=task_type,
+                        tokens_used=tokens_used,
+                        cost=cost,
+                        run_id=run_id
+                    ))
+                else:
+                    # Otherwise run in new loop
+                    loop.run_until_complete(self.memory_db.log_model_call(
+                        model_name=model_id,
+                        provider=provider,
+                        success=success,
+                        latency=latency,
+                        task_type=task_type,
+                        tokens_used=tokens_used,
+                        cost=cost,
+                        run_id=run_id
+                    ))
+            except Exception as e:
+                logger.debug(f"Failed to log to memory DB: {e}")
 
     def get_performance_report(self) -> Dict[str, Any]:
         """
