@@ -182,6 +182,14 @@ class CreateOrchestrationRequest(BaseModel):
     strategy: str = "manager-led"  # "sequential", "parallel", "manager-led"
 
 
+class CodingBuildRequest(BaseModel):
+    prompt: str
+    project_context: Optional[dict] = None
+    tech_stack_preferences: Optional[dict] = None
+    quality_threshold: Optional[float] = 0.95
+    max_iterations: Optional[int] = 5
+
+
 # Routes
 
 @app.get("/")
@@ -1182,6 +1190,222 @@ async def stream_orchestration(orchestration_id: int):
                     yield f"data: {json.dumps(payload)}\n\n"
 
                 if orchestration.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                    break
+
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/coding/build")
+async def create_coding_build(
+    request: CodingBuildRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session)
+):
+    """
+    Create a fully autonomous coding build from natural language.
+
+    This endpoint activates the Coding Orchestrator system which:
+    1. Parses requirements from the prompt
+    2. Coordinates specialized AI coders (frontend, backend, database, etc.)
+    3. Implements self-correction loops with validation
+    4. Produces production-ready code with zero errors
+    5. Learns from each build to improve future results
+
+    The orchestrator will iterate up to max_iterations times until
+    quality_threshold is met or exceeded.
+    """
+    logger.info(f"Starting coding build: {request.prompt[:100]}...")
+
+    # Create a Run record to track this build
+    run = Run(
+        status=RunStatus.QUEUED,
+        prompt=request.prompt,
+        inputs={
+            "project_context": request.project_context or {},
+            "tech_stack_preferences": request.tech_stack_preferences or {},
+            "quality_threshold": request.quality_threshold or 0.95,
+            "max_iterations": request.max_iterations or 5
+        },
+        created_at=datetime.utcnow()
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    # Queue the coding build job
+    from workers.runner import run_coding_build_job
+    background_tasks.add_task(run_coding_build_job, run.id, request.dict())
+
+    logger.info(f"Created coding build run {run.id}")
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "message": "Coding build started - specialized AI coders are working on your request",
+        "execution_mode": "coding_orchestrator"
+    }
+
+
+@app.get("/api/coding/builds/{run_id}")
+async def get_coding_build(run_id: int, session: Session = Depends(get_session)):
+    """Get detailed status and outputs from a coding build."""
+    run = session.get(Run, run_id)
+
+    if not run:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Parse outputs for coding build specific data
+    outputs = run.outputs or {}
+    requirements = outputs.get("requirements", {})
+    iterations = outputs.get("all_iterations", [])
+    final_outputs = outputs.get("outputs", {})
+    validation = outputs.get("validation", {})
+
+    return {
+        "id": run.id,
+        "status": run.status,
+        "prompt": run.prompt,
+        "logs": run.logs,
+        "error": run.error,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "total_cost": run.total_cost,
+        "total_tokens": run.total_tokens,
+        # Coding build specific fields
+        "requirements": requirements,
+        "project_name": requirements.get("project_name"),
+        "project_type": requirements.get("project_type"),
+        "tech_stack": requirements.get("tech_stack"),
+        "complexity": requirements.get("complexity"),
+        "iterations": len(iterations),
+        "final_score": outputs.get("final_score"),
+        "passed": outputs.get("passed"),
+        "coders_used": list(final_outputs.keys()) if final_outputs else [],
+        "validation": validation,
+        "build_summary": outputs.get("build_summary"),
+        "all_iterations": iterations,
+        "codebase": final_outputs  # Complete generated code from all coders
+    }
+
+
+@app.get("/api/coding/builds/{run_id}/download")
+async def download_coding_build(run_id: int, session: Session = Depends(get_session)):
+    """
+    Download the complete codebase from a coding build as a zip file.
+    """
+    import zipfile
+    import io
+    from fastapi.responses import Response
+
+    run = session.get(Run, run_id)
+
+    if not run:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    if run.status != RunStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Build not completed yet")
+
+    outputs = run.outputs or {}
+    codebase = outputs.get("outputs", {})
+    requirements = outputs.get("requirements", {})
+    project_name = requirements.get("project_name", "codebase")
+
+    # Create zip file in memory
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Add README
+        readme = f"""# {project_name}
+
+Generated by Smartsystem7 Coding Orchestrator
+
+## Project Details
+- Type: {requirements.get('project_type', 'unknown')}
+- Tech Stack: {requirements.get('tech_stack', {})}
+- Complexity: {requirements.get('complexity', 'unknown')}
+- Quality Score: {outputs.get('final_score', 0):.2%}
+
+## Build Summary
+{outputs.get('build_summary', 'No summary available')}
+
+## Generated Components
+"""
+        for coder_name in codebase.keys():
+            readme += f"- {coder_name.upper()}\n"
+
+        zip_file.writestr(f"{project_name}/README.md", readme)
+
+        # Add each coder's output
+        for coder_name, coder_output in codebase.items():
+            if isinstance(coder_output, dict) and coder_output.get("success"):
+                output_text = coder_output.get("output", "")
+                zip_file.writestr(f"{project_name}/{coder_name}/{coder_name}_output.md", output_text)
+
+        # Add build metadata
+        import json
+        metadata = {
+            "prompt": run.prompt,
+            "requirements": requirements,
+            "final_score": outputs.get("final_score"),
+            "iterations": outputs.get("iterations"),
+            "validation": outputs.get("validation")
+        }
+        zip_file.writestr(f"{project_name}/build_metadata.json", json.dumps(metadata, indent=2))
+
+    zip_buffer.seek(0)
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={project_name}.zip"}
+    )
+
+
+@app.get("/api/coding/builds/{run_id}/stream")
+async def stream_coding_build(run_id: int):
+    """Stream coding build logs and status updates via SSE."""
+
+    async def event_generator():
+        last_log_length = 0
+        last_status = None
+
+        while True:
+            with Session(engine) as session:
+                run = session.get(Run, run_id)
+                if not run:
+                    payload = {"event": "error", "data": "Build not found"}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+
+                logs = run.logs or ""
+                if len(logs) > last_log_length:
+                    new_chunk = logs[last_log_length:]
+                    last_log_length = len(logs)
+                    payload = {"event": "log", "data": new_chunk}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                status_value = run.status.value if isinstance(run.status, RunStatus) else str(run.status)
+                if status_value != last_status:
+                    last_status = status_value
+                    payload = {"event": "status", "data": status_value}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                # Send progress updates
+                if run.outputs:
+                    outputs = run.outputs
+                    if outputs.get("final_score") is not None:
+                        payload = {
+                            "event": "progress",
+                            "data": {
+                                "score": outputs.get("final_score"),
+                                "iteration": outputs.get("iterations", 0)
+                            }
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+
+                if run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
                     break
 
             await asyncio.sleep(1)
