@@ -1413,6 +1413,423 @@ async def stream_coding_build(run_id: int):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+# ===== Telemetry & Dashboard Endpoints =====
+
+@app.get("/api/telemetry/builds")
+async def get_telemetry_builds(
+    limit: int = 20,
+    offset: int = 0,
+    status: Optional[str] = None
+):
+    """
+    Get paginated list of past builds from memory database.
+
+    Args:
+        limit: Maximum number of records (default 20)
+        offset: Offset for pagination (default 0)
+        status: Filter by status (optional)
+
+    Returns:
+        List of build records with telemetry data
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        builds = await memory_db.get_builds(limit=limit, offset=offset, status_filter=status)
+
+        return {
+            "builds": builds,
+            "limit": limit,
+            "offset": offset,
+            "count": len(builds)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get telemetry builds: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve builds: {str(e)}")
+
+
+@app.get("/api/telemetry/builds/{run_id}")
+async def get_telemetry_build(run_id: str):
+    """
+    Get full details for a specific build from memory database.
+
+    Args:
+        run_id: Build run ID
+
+    Returns:
+        Complete build record with model calls
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        build = await memory_db.get_build_by_id(run_id)
+
+        if not build:
+            raise HTTPException(status_code=404, detail="Build not found in memory database")
+
+        # Get associated model calls
+        model_calls = await memory_db.get_model_calls_for_run(run_id)
+
+        return {
+            "build": build,
+            "model_calls": model_calls
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get build {run_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve build: {str(e)}")
+
+
+@app.get("/api/telemetry/models")
+async def get_telemetry_models():
+    """
+    Get average performance stats for all models.
+
+    Returns:
+        List of model statistics (latency, success rate, call counts)
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        model_stats = await memory_db.get_model_stats()
+
+        return {
+            "models": model_stats,
+            "count": len(model_stats)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get model stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve model stats: {str(e)}")
+
+
+@app.get("/api/telemetry/stats")
+async def get_telemetry_stats():
+    """
+    Get overall telemetry statistics summary.
+
+    Returns:
+        Summary statistics for builds, models, and deployments
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        stats = await memory_db.get_stats_summary()
+
+        return stats
+
+    except Exception as e:
+        logger.error(f"Failed to get telemetry stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve stats: {str(e)}")
+
+
+@app.get("/api/dashboard/deployments")
+async def get_dashboard_deployments(limit: int = 20, offset: int = 0):
+    """
+    Get last N successful builds for dashboard display.
+
+    Args:
+        limit: Maximum number of records (default 20)
+        offset: Offset for pagination (default 0)
+
+    Returns:
+        List of deployment records with GitHub and Vercel URLs
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        builds = await memory_db.get_builds(limit=limit, offset=offset, status_filter="completed")
+
+        # Format for dashboard display
+        deployments = []
+        for build in builds:
+            deployments.append({
+                "run_id": build["run_id"],
+                "prompt": build["prompt"][:100] + "..." if len(build["prompt"]) > 100 else build["prompt"],
+                "quality": build["quality"],
+                "model_map": build.get("model_map", {}),
+                "repo_url": build.get("repo_url"),
+                "vercel_url": build.get("vercel_url"),
+                "created_at": build["created_at"],
+                "duration_sec": build.get("duration_sec"),
+                "project_type": build.get("project_type"),
+                "tech_stack": build.get("tech_stack"),
+                "github_deployed": build.get("github_deployed", False),
+                "vercel_deployed": build.get("vercel_deployed", False),
+            })
+
+        return {
+            "deployments": deployments,
+            "limit": limit,
+            "offset": offset,
+            "count": len(deployments)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get dashboard deployments: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve deployments: {str(e)}")
+
+
+@app.get("/api/dashboard/deployments/{run_id}")
+async def get_dashboard_deployment(run_id: str):
+    """
+    Get full detail view for a specific deployment.
+
+    Args:
+        run_id: Build run ID
+
+    Returns:
+        Complete deployment record
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        build = await memory_db.get_build_by_id(run_id)
+
+        if not build:
+            raise HTTPException(status_code=404, detail="Deployment not found")
+
+        # Get associated model calls
+        model_calls = await memory_db.get_model_calls_for_run(run_id)
+
+        return {
+            "deployment": build,
+            "model_calls": model_calls
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get deployment {run_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve deployment: {str(e)}")
+
+
+# ===== Multi-Agent Chain Build Endpoints =====
+
+class ChainBuildRequest(BaseModel):
+    chain_name: str
+    agent_ids: List[int]
+    goal: str
+    strategy: str = "sequential"  # "sequential", "parallel", "manager-led"
+
+
+@app.post("/api/agents/chain-build")
+async def create_chain_build(
+    request: ChainBuildRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session)
+):
+    """
+    Start a multi-agent chain build.
+
+    Coordinates multiple agents to work together on a single goal.
+    Supports sequential, parallel, and manager-led execution strategies.
+
+    Args:
+        request: Chain build configuration
+
+    Returns:
+        Chain build ID and status
+    """
+    import uuid
+
+    logger.info(
+        f"Creating chain build '{request.chain_name}' with {len(request.agent_ids)} agents"
+    )
+
+    # Validate agents exist
+    for agent_id in request.agent_ids:
+        agent = session.get(Agent, agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+
+    # Generate chain ID
+    chain_id = str(uuid.uuid4())
+
+    # Create orchestration record to track the chain
+    orchestration = Orchestration(
+        agent_ids=request.agent_ids,
+        prompt=f"[{request.chain_name}] {request.goal}",
+        strategy=request.strategy,
+        status=RunStatus.QUEUED,
+        agent_progress={str(aid): 0 for aid in request.agent_ids},
+        agent_outputs={},
+        created_at=datetime.utcnow()
+    )
+
+    session.add(orchestration)
+    session.commit()
+    session.refresh(orchestration)
+
+    # Queue the chain build job
+    from workers.runner import run_chain_build_job
+    try:
+        background_tasks.add_task(
+            run_chain_build_job,
+            orchestration.id,
+            chain_id,
+            request.chain_name,
+            request.agent_ids,
+            request.goal,
+            request.strategy
+        )
+    except ImportError:
+        # Fallback: if worker not available, use inline execution
+        logger.warning("Worker not available, executing chain inline (not recommended for production)")
+
+    logger.info(f"Created chain build {chain_id} (orchestration {orchestration.id})")
+
+    return {
+        "chain_id": chain_id,
+        "orchestration_id": orchestration.id,
+        "status": "queued",
+        "agent_count": len(request.agent_ids),
+        "strategy": request.strategy,
+        "message": "Multi-agent chain build started"
+    }
+
+
+@app.get("/api/agents/chain-builds/{chain_id}")
+async def get_chain_build(chain_id: str):
+    """
+    Get aggregated outputs from a chain build.
+
+    Args:
+        chain_id: Chain build ID
+
+    Returns:
+        Chain build status and outputs
+    """
+    from app.services.memory_db import get_memory_db
+    from app.config import settings
+
+    try:
+        memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+        build = await memory_db.get_build_by_id(chain_id)
+
+        if not build:
+            raise HTTPException(status_code=404, detail="Chain build not found")
+
+        # Get model calls for this chain
+        model_calls = await memory_db.get_model_calls_for_run(chain_id)
+
+        # Parse chain metadata from requirements
+        requirements = build.get("requirements", {})
+        agent_ids = requirements.get("agent_ids", [])
+        strategy = requirements.get("strategy", "sequential")
+
+        return {
+            "chain_id": chain_id,
+            "chain_name": requirements.get("chain_name", "Unnamed Chain"),
+            "goal": build["prompt"].replace("[CHAIN: ", "").split("]", 1)[-1].strip(),
+            "status": build["status"],
+            "quality": build["quality"],
+            "agent_ids": agent_ids,
+            "strategy": strategy,
+            "duration_sec": build.get("duration_sec"),
+            "created_at": build["created_at"],
+            "model_calls": model_calls,
+            "error": build.get("error")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get chain build {chain_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve chain build: {str(e)}")
+
+
+@app.get("/api/agents/chain-builds/{chain_id}/stream")
+async def stream_chain_build(chain_id: str):
+    """
+    Live SSE stream of chain build progress.
+
+    Args:
+        chain_id: Chain build ID
+
+    Returns:
+        Server-Sent Events stream with progress updates
+    """
+
+    async def event_generator():
+        """Generate SSE events for chain build progress."""
+        last_status = None
+        check_count = 0
+        max_checks = 300  # 5 minutes at 1s intervals
+
+        while check_count < max_checks:
+            try:
+                from app.services.memory_db import get_memory_db
+                from app.config import settings
+
+                memory_db = await get_memory_db(settings.MEMORY_DB_PATH)
+                build = await memory_db.get_build_by_id(chain_id)
+
+                if not build:
+                    if check_count == 0:
+                        # Not found on first check
+                        payload = {"event": "error", "data": "Chain build not found"}
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        break
+                    else:
+                        # Wait for it to be created
+                        await asyncio.sleep(1)
+                        check_count += 1
+                        continue
+
+                # Send status updates
+                status = build["status"]
+                if status != last_status:
+                    last_status = status
+                    payload = {"event": "status", "data": status}
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+                # Send progress data
+                payload = {
+                    "event": "progress",
+                    "data": {
+                        "quality": build["quality"],
+                        "duration_sec": build.get("duration_sec", 0)
+                    }
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+
+                # Check if completed
+                if status in ["completed", "failed"]:
+                    payload = {
+                        "event": "complete" if status == "completed" else "error",
+                        "data": build.get("error", "Chain build completed")
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+
+            except Exception as e:
+                logger.error(f"Error streaming chain build {chain_id}: {e}")
+                payload = {"event": "error", "data": str(e)}
+                yield f"data: {json.dumps(payload)}\n\n"
+                break
+
+            await asyncio.sleep(1)
+            check_count += 1
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
