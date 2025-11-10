@@ -32,8 +32,11 @@ class GitHubClient:
             config: Application config with GitHub settings
         """
         self.config = config
+        self.token = config.GITHUB_TOKEN
         self.github = None
         self.user = None
+        self.org = None
+        self.owner_login: Optional[str] = None
 
         self._init_client()
 
@@ -45,9 +48,22 @@ class GitHubClient:
 
         try:
             from github import Github
-            self.github = Github(self.config.GITHUB_TOKEN)
+
+            self.github = Github(self.token)
             self.user = self.github.get_user()
-            logger.info(f"GitHub client initialized for user: {self.user.login}")
+            self.owner_login = self.user.login if self.user else None
+
+            configured_owner = getattr(self.config, "GITHUB_OWNER", None)
+            if configured_owner and self.user and configured_owner != self.user.login:
+                try:
+                    self.org = self.github.get_organization(configured_owner)
+                    self.owner_login = configured_owner
+                    logger.info("GitHub client initialized for organization: %s", configured_owner)
+                except Exception as exc:
+                    logger.warning("Unable to access configured GitHub owner '%s': %s", configured_owner, exc)
+                    logger.info(f"GitHub client initialized for user: {self.user.login}")
+            else:
+                logger.info(f"GitHub client initialized for user: {self.user.login}")
         except Exception as e:
             logger.error(f"Failed to initialize GitHub client: {e}")
             self.github = None
@@ -55,6 +71,38 @@ class GitHubClient:
     def is_available(self) -> bool:
         """Check if GitHub client is available."""
         return self.github is not None
+
+    def get_token_scopes(self) -> list[str]:
+        """Return the scopes associated with the configured PAT."""
+        if not self.token:
+            return []
+
+        try:
+            import requests
+
+            response = requests.get(
+                "https://api.github.com/rate_limit",
+                headers={"Authorization": f"token {self.token}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            scopes_header = response.headers.get("X-OAuth-Scopes", "")
+            scopes = [scope.strip() for scope in scopes_header.split(",") if scope.strip()]
+            logger.info("GitHub token scopes: %s", scopes)
+            return scopes
+        except Exception as exc:
+            logger.error("Failed to retrieve GitHub token scopes: %s", exc)
+            return []
+
+    def validate_scopes(self, required_scopes: list[str]) -> Dict[str, Any]:
+        """Validate that token includes required scopes."""
+        scopes = set(self.get_token_scopes())
+        missing = [scope for scope in required_scopes if scope not in scopes]
+        return {
+            "valid": not missing,
+            "scopes": list(scopes),
+            "missing": missing,
+        }
 
     async def create_repository(
         self,
@@ -95,15 +143,19 @@ class GitHubClient:
 
             # Run in thread pool (PyGithub is sync)
             loop = asyncio.get_event_loop()
-            repo = await loop.run_in_executor(
-                None,
-                lambda: self.user.create_repo(
+
+            def _create_repo():
+                owner = self.org if self.org is not None else self.user
+                if owner is None:
+                    raise RuntimeError("GitHub owner context not available")
+                return owner.create_repo(
                     name=full_name,
                     description=description,
                     private=private,
                     auto_init=auto_init,
                 )
-            )
+
+            repo = await loop.run_in_executor(None, _create_repo)
 
             logger.info(f"Repository created: {repo.html_url}")
 

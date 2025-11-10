@@ -5,6 +5,7 @@ SQLModel data models for Agent Factory.
 from datetime import datetime
 from typing import Optional
 from enum import Enum
+import uuid
 
 from sqlmodel import Field, SQLModel, JSON, Column
 from pydantic import BaseModel
@@ -34,6 +35,21 @@ class ApprovalStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class AgentPlanState(str, Enum):
+    DRAFT = "draft"
+    REFINING = "refining"
+    READY = "ready"
+
+
+class AgentBuildStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    VALIDATING = "validating"
+    DEPLOYING = "deploying"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 # Database Models
@@ -119,6 +135,7 @@ class Run(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     agent_id: Optional[int] = Field(default=None, foreign_key="agents.id", index=True)
     project_id: Optional[int] = Field(default=None, foreign_key="projects.id", index=True)
+    plan_id: Optional[str] = Field(default=None, index=True)
 
     status: RunStatus = Field(default=RunStatus.QUEUED)
 
@@ -198,6 +215,58 @@ class Secret(SQLModel, table=True):
     value: str  # Encrypted in production
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentPlan(SQLModel, table=True):
+    """Persistent agent plan with iterative revisions."""
+
+    __tablename__ = "agent_plans"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True, index=True)
+    prompt: str
+    plan: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    graph: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    suggested_stack: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    risks: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    summary: Optional[str] = None
+    state: AgentPlanState = Field(default=AgentPlanState.DRAFT)
+    chat_history: list[dict] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    last_revision_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    user_id: str = Field(default="dev_user")
+
+
+class AgentPlanRevision(SQLModel, table=True):
+    """Incremental revisions to an agent plan."""
+
+    __tablename__ = "agent_plan_revisions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    plan_id: str = Field(foreign_key="agent_plans.id", index=True)
+    delta: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    summary: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    user_id: str = Field(default="dev_user")
+
+
+class AgentBuild(SQLModel, table=True):
+    """Build execution linked to an agent plan."""
+
+    __tablename__ = "agent_builds"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    plan_id: str = Field(foreign_key="agent_plans.id", index=True)
+    run_id: str = Field(index=True)
+    status: AgentBuildStatus = Field(default=AgentBuildStatus.QUEUED)
+    quality_score: Optional[float] = None
+    repo_url: Optional[str] = None
+    vercel_url: Optional[str] = None
+    artifacts: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    logs: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    user_id: str = Field(default="dev_user")
 
 
 class Orchestration(SQLModel, table=True):

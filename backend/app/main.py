@@ -8,7 +8,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
@@ -30,6 +30,10 @@ from app.models import (
     Artifact,
     ResearchSource,
     Orchestration,
+    AgentPlan,
+    AgentPlanState,
+    AgentBuild,
+    AgentBuildStatus,
 )
 from app.services import (
     LLMRouter,
@@ -38,6 +42,9 @@ from app.services import (
     SecretsService,
     estimate_run_cost,
     get_current_pricing,
+    run_research,
+    PlanService,
+    BuildService,
 )
 
 # Configure logging
@@ -99,6 +106,7 @@ async def lifespan(app: FastAPI):
         logger.info("ℹ️  Using default SQLite database")
     
     create_db_and_tables()
+    await refresh_service_health()
     yield
     logger.info("Shutting down Agent Factory...")
 
@@ -124,6 +132,57 @@ app.add_middleware(
 llm_router = LLMRouter()
 approval_service = ApprovalService()
 notification_service = NotificationService()
+plan_service = PlanService()
+build_service = BuildService()
+
+REQUIRED_GITHUB_SCOPES = ["repo", "workflow", "admin:repo_hook", "delete_repo"]
+service_health: Dict[str, Any] = {
+    "github": {"ok": False, "missing": REQUIRED_GITHUB_SCOPES, "scopes": []},
+    "vercel": {"ok": build_service.vercel_client.is_available()},
+    "docker": {"ok": build_service.docker_executor.is_available()},
+    "db": {"ok": True},
+}
+
+
+async def refresh_service_health() -> None:
+    """Update cached service health information."""
+    global service_health
+
+    if build_service.github_client.is_available():
+        github_validation = build_service.github_client.validate_scopes(REQUIRED_GITHUB_SCOPES)
+        github_status = {
+            "ok": github_validation["valid"],
+            "missing": github_validation["missing"],
+            "scopes": github_validation["scopes"],
+        }
+        if github_validation["missing"]:
+            logger.warning("GitHub token missing scopes: %s", github_validation["missing"])
+    else:
+        github_status = {
+            "ok": False,
+            "missing": REQUIRED_GITHUB_SCOPES,
+            "scopes": [],
+        }
+
+    docker_ok = build_service.docker_executor.is_available()
+    vercel_ok = build_service.vercel_client.is_available()
+
+    try:
+        with Session(engine) as session:
+            session.exec(select(Project.id).limit(1))
+        database_ok = True
+    except Exception as exc:
+        logger.error("Database health check failed: %s", exc)
+        database_ok = False
+
+    service_health.update(
+        {
+            "github": github_status,
+            "vercel": {"ok": vercel_ok},
+            "docker": {"ok": docker_ok},
+            "db": {"ok": database_ok},
+        }
+    )
 
 
 # Pydantic models for requests
@@ -190,6 +249,58 @@ class CodingBuildRequest(BaseModel):
     max_iterations: Optional[int] = 5
 
 
+class ResearchRequest(BaseModel):
+    prompt: str
+
+
+class PlanCreateRequest(BaseModel):
+    prompt: str
+
+
+class PlanRevisionRequest(BaseModel):
+    revision: str
+    mark_ready: bool = False
+
+
+class BuildPlanRequest(BaseModel):
+    plan_id: str
+    enable_deployment: bool = False
+
+
+def serialize_plan(plan: AgentPlan) -> Dict[str, Any]:
+    state_value = plan.state.value if isinstance(plan.state, AgentPlanState) else str(plan.state)
+    return {
+        "plan_id": plan.id,
+        "prompt": plan.prompt,
+        "plan": plan.plan,
+        "graph": plan.graph,
+        "suggested_stack": plan.suggested_stack,
+        "risks": plan.risks,
+        "state": state_value,
+        "chat_history": plan.chat_history,
+        "summary": plan.summary,
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+        "last_revision_at": plan.last_revision_at.isoformat() if plan.last_revision_at else None,
+    }
+
+
+def serialize_build(build: AgentBuild) -> Dict[str, Any]:
+    status_value = build.status.value if isinstance(build.status, AgentBuildStatus) else str(build.status)
+    return {
+        "run_id": build.run_id,
+        "plan_id": build.plan_id,
+        "status": status_value,
+        "quality_score": build.quality_score,
+        "repo_url": build.repo_url,
+        "vercel_url": build.vercel_url,
+        "artifacts": build.artifacts,
+        "created_at": build.created_at.isoformat() if build.created_at else None,
+        "updated_at": build.updated_at.isoformat() if build.updated_at else None,
+        "logs": build.logs,
+    }
+
+
 # Routes
 
 @app.get("/")
@@ -200,6 +311,158 @@ async def root():
         "version": "0.1.0",
         "status": "running"
     }
+
+
+@app.get("/health")
+async def health():
+    await refresh_service_health()
+    overall_ok = all(section.get("ok") for section in service_health.values())
+    return {
+        "status": "ok" if overall_ok else "degraded",
+        "services": service_health,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/health/github")
+async def health_github():
+    await refresh_service_health()
+    github_status = service_health.get("github", {})
+    if not github_status.get("ok"):
+        raise HTTPException(status_code=503, detail=github_status)
+    return github_status
+
+
+@app.post("/api/research")
+async def research_endpoint(request: ResearchRequest):
+    prompt = (request.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    try:
+        return await run_research(prompt)
+    except Exception as exc:
+        logger.error("Research workflow failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/agents/plan")
+async def create_plan_endpoint(
+    request: PlanCreateRequest,
+    session: Session = Depends(get_session),
+):
+    try:
+        plan = await plan_service.create_plan(session, request.prompt)
+        return serialize_plan(plan)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/agents/plan/{plan_id}")
+async def get_plan_endpoint(plan_id: str, session: Session = Depends(get_session)):
+    try:
+        plan = plan_service.get_plan(session, plan_id)
+        return serialize_plan(plan)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.patch("/api/agents/plan/{plan_id}")
+async def revise_plan_endpoint(
+    plan_id: str,
+    request: PlanRevisionRequest,
+    session: Session = Depends(get_session),
+):
+    try:
+        plan = await plan_service.apply_revision(
+            session,
+            plan_id,
+            request.revision,
+            mark_ready=request.mark_ready,
+        )
+        return serialize_plan(plan)
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message)
+
+
+@app.post("/api/agents/build")
+async def start_build_endpoint(
+    request: BuildPlanRequest,
+    session: Session = Depends(get_session),
+):
+    try:
+        run_id = await build_service.start_build(
+            session, request.plan_id, request.enable_deployment
+        )
+        return {"run_id": run_id, "status": "queued"}
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message)
+
+
+@app.get("/api/agents/builds/{run_id}/stream")
+async def stream_build_logs(run_id: str):
+    async def event_generator():
+        try:
+            async for event in build_service.stream_events(run_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        except ValueError:
+            error_payload = {"type": "error", "data": {"message": "Run not found"}}
+            yield f"data: {json.dumps(error_payload)}\n\n"
+        finally:
+            yield "event: end\ndata: {}\n\n"
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@app.get("/api/agents/builds/{run_id}")
+async def get_build_endpoint(run_id: str, session: Session = Depends(get_session)):
+    try:
+        build = build_service.get_build(session, run_id)
+        return serialize_build(build)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/agents/builds/{run_id}/files")
+async def list_build_files(run_id: str, session: Session = Depends(get_session)):
+    try:
+        build = build_service.get_build(session, run_id)
+        return build_service.list_files(build)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/agents/builds/{run_id}/file")
+async def get_build_file(
+    run_id: str,
+    path: str,
+    session: Session = Depends(get_session),
+):
+    if not path:
+        raise HTTPException(status_code=400, detail="Query parameter 'path' is required")
+    try:
+        build = build_service.get_build(session, run_id)
+        return build_service.get_file(build, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/agents/deploy/{run_id}")
+async def force_deploy_endpoint(run_id: str):
+    try:
+        new_run_id = await build_service.force_deploy(run_id)
+        return {"run_id": new_run_id, "status": "queued"}
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message)
 
 
 @app.post("/api/ask")

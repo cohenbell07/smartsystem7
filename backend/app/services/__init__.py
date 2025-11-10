@@ -11,6 +11,9 @@ from .pricing import (
     calculate_actual_cost,
     get_current_pricing,
 )
+from .research_service import run_research
+from .plan_service import PlanService
+from .build_service import BuildService
 
 __all__ = [
     "LLMRouter",
@@ -22,4 +25,7 @@ __all__ = [
     "estimate_run_cost",
     "calculate_actual_cost",
     "get_current_pricing",
+    "run_research",
+    "PlanService",
+    "BuildService",
 ]

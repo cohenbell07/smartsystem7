@@ -7,12 +7,19 @@ Never logs sensitive values like API keys and tokens.
 
 import os
 from typing import Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
     # Database
     DATABASE_URL: str = Field(
@@ -149,11 +156,6 @@ class Settings(BaseSettings):
         default="backend/data/memory.sqlite3",
         description="Path to SQLite database for build history and telemetry"
     )
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
 
     def get_allowed_origins_list(self) -> list[str]:
         """Parse allowed origins from comma-separated string."""
