@@ -8,14 +8,17 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,6 +49,7 @@ from app.services import (
     PlanService,
     BuildService,
 )
+from app.agents.video_generation import CinematicVideoAgent
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +57,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent
+ARTIFACTS_ROOT = BASE_DIR / "generated_artifacts"
+VIDEO_OUTPUT_DIR = ARTIFACTS_ROOT / "video_generation"
+ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Lifecycle
@@ -107,6 +117,14 @@ async def lifespan(app: FastAPI):
     
     create_db_and_tables()
     await refresh_service_health()
+
+    # Instantiate cinematic video agent and run registry cache
+    app.state.cinematic_video_agent = CinematicVideoAgent(
+        llm_router=llm_router,
+        output_root=VIDEO_OUTPUT_DIR,
+        vector_memory=None,
+    )
+    app.state.video_generation_runs = {}
     yield
     logger.info("Shutting down Agent Factory...")
 
@@ -118,6 +136,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_ROOT)), name="artifacts")
 
 # CORS
 app.add_middleware(
@@ -265,6 +285,44 @@ class PlanRevisionRequest(BaseModel):
 class BuildPlanRequest(BaseModel):
     plan_id: str
     enable_deployment: bool = False
+
+
+class VideoGenerationRequest(BaseModel):
+    script: str
+    project_name: Optional[str] = None
+    target_duration: Optional[int] = Field(default=60, ge=10, le=240)
+    visual_style: Optional[str] = None
+    music_style: Optional[str] = None
+    voice_profile: Optional[str] = None
+    enable_external_apis: bool = False
+
+
+class VideoGenerationRun(BaseModel):
+    run_id: str
+    project_name: str
+    created_at: datetime
+    video_url: str
+    storyboard: List[Dict[str, Any]]
+    scene_requests: List[Dict[str, Any]]
+    synthesis: Dict[str, Any]
+
+
+def _get_cinematic_video_agent() -> CinematicVideoAgent:
+    agent = getattr(app.state, "cinematic_video_agent", None)
+    if agent is None:
+        raise HTTPException(status_code=500, detail="Cinematic video agent not initialized")
+    return agent
+
+
+def _store_video_run(run_id: str, payload: Dict[str, Any], video_path: Path) -> None:
+    runs = getattr(app.state, "video_generation_runs", None)
+    if runs is None:
+        runs = {}
+        app.state.video_generation_runs = runs
+    runs[run_id] = {
+        "payload": payload,
+        "video_path": str(video_path),
+    }
 
 
 def serialize_plan(plan: AgentPlan) -> Dict[str, Any]:
@@ -452,6 +510,81 @@ async def get_build_file(
         return build_service.get_file(build, path)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/agents/video-generation/run", response_model=VideoGenerationRun)
+async def run_cinematic_video_agent(request: VideoGenerationRequest):
+    script = (request.script or "").strip()
+    if not script:
+        raise HTTPException(status_code=400, detail="Script is required")
+
+    agent = _get_cinematic_video_agent()
+    project_name = request.project_name.strip() if request.project_name else "Cinematic Video Agent"
+    run_id = str(uuid4())
+    project_slug = project_name.lower().replace(" ", "-") or f"cinematic-video-{run_id[:8]}"
+
+    result = await agent.generate_video(
+        script=script,
+        project_name=project_slug,
+        target_duration=request.target_duration or 60,
+        visual_style=request.visual_style,
+        music_style=request.music_style,
+        voice_profile=request.voice_profile,
+        enable_external_apis=request.enable_external_apis,
+    )
+
+    video_path = Path(result["video_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=500, detail="Video synthesis did not produce an output file")
+
+    try:
+        relative_path = video_path.relative_to(ARTIFACTS_ROOT)
+    except ValueError:
+        relative_path = video_path
+
+    video_url = f"/artifacts/{relative_path.as_posix()}"
+    created_at = datetime.utcnow()
+
+    payload = {
+        "run_id": run_id,
+        "project_name": project_name,
+        "created_at": created_at,
+        "video_url": video_url,
+        "storyboard": result.get("storyboard", []),
+        "scene_requests": result.get("scene_requests", []),
+        "synthesis": result.get("synthesis", {}),
+    }
+
+    _store_video_run(run_id, payload, video_path)
+    return VideoGenerationRun(**payload)
+
+
+@app.get("/api/agents/video-generation/runs/{run_id}", response_model=VideoGenerationRun)
+async def get_cinematic_video_run(run_id: str):
+    runs = getattr(app.state, "video_generation_runs", {})
+    run_data = runs.get(run_id)
+    if not run_data:
+        raise HTTPException(status_code=404, detail="Run not found")
+    payload = run_data.get("payload", {})
+    return VideoGenerationRun(**payload)
+
+
+@app.get("/api/agents/video-generation/runs/{run_id}/download")
+async def download_cinematic_video(run_id: str):
+    runs = getattr(app.state, "video_generation_runs", {})
+    run_data = runs.get(run_id)
+    if not run_data:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    video_path = Path(run_data.get("video_path", ""))
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    return FileResponse(
+        path=video_path,
+        filename=video_path.name,
+        media_type="video/mp4",
+    )
 
 
 @app.post("/api/agents/deploy/{run_id}")
